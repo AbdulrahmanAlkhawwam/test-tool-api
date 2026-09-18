@@ -44,6 +44,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
       if (exception.code === 'P2002') {
         return { statusCode: 409, error: 'Conflict', message: 'A record with the same unique value already exists' };
       }
+      if (exception.code === 'P2003') {
+        return { statusCode: 409, error: 'Conflict', message: 'The record is referenced by other data' };
+      }
       if (exception.code === 'P2025') {
         return { statusCode: 404, error: 'Not Found', message: 'Record not found' };
       }

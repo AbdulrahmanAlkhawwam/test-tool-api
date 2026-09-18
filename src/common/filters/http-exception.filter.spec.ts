@@ -56,6 +56,14 @@ describe('HttpExceptionFilter', () => {
     });
   });
 
+  it('maps Prisma foreign key violations to 409', () => {
+    const err = new Prisma.PrismaClientKnownRequestError('Foreign key constraint violated', { code: 'P2003', clientVersion: 'test' });
+    expect(run(err)).toEqual({
+      status: 409,
+      body: { statusCode: 409, error: 'Conflict', message: 'The record is referenced by other data' },
+    });
+  });
+
   it('maps Prisma record-not-found to 404', () => {
     const err = new Prisma.PrismaClientKnownRequestError('Not found', { code: 'P2025', clientVersion: 'test' });
     expect(run(err).status).toBe(404);
