@@ -2,10 +2,6 @@
   "name": "ejad-testcases-api",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs"
-  },
   "private": true,
   "scripts": {
     "build": "prisma generate && nest build",
@@ -27,9 +23,7 @@
     "transform": { "^.+\\.(t|j)s$": "ts-jest" },
     "testEnvironment": "node"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "UNLICENSED",
   "dependencies": {
     "@nestjs/common": "^10.4.22",
     "@nestjs/config": "^3.3.0",
