@@ -5,6 +5,7 @@ import { HealthController } from './health.controller';
 import { AuthModule } from './modules/auth/auth.module';
 import { ProjectModulesModule } from './modules/project-modules/project-modules.module';
 import { ProjectsModule } from './modules/projects/projects.module';
+import { TestCasesModule } from './modules/test-cases/test-cases.module';
 import { UsersModule } from './modules/users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
 
@@ -16,6 +17,7 @@ import { PrismaModule } from './prisma/prisma.module';
     UsersModule,
     ProjectsModule,
     ProjectModulesModule,
+    TestCasesModule,
   ],
   controllers: [HealthController],
 })
