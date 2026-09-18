@@ -73,10 +73,14 @@ export class TestCasesService {
       });
       const code = nextCaseCode(module.code, existing.map((c) => c.code));
       try {
-        return await this.prisma.testCase.create({
+        // Write with a minimal select, then read relations back outside Prisma's implicit
+        // write transaction: an include here would load the relations in parallel on the
+        // transaction's single pinned pg client (pg concurrent-query deprecation).
+        const { id } = await this.prisma.testCase.create({
           data: { ...dto, code, projectId, createdById: user.id, updatedById: user.id },
-          include: CASE_INCLUDE,
+          select: { id: true },
         });
+        return this.findWithRelations(id);
       } catch (e) {
         if (!isUniqueViolation(e) || attempt === maxAttempts) throw e;
       }
@@ -117,11 +121,16 @@ export class TestCasesService {
   async update(id: string, dto: UpdateTestCaseDto, user: AuthUser) {
     const existing = await this.requireActiveCase(id);
     if (dto.moduleId) await this.requireModuleInProject(existing.projectId, dto.moduleId);
-    return this.prisma.testCase.update({
+    await this.prisma.testCase.update({
       where: { id },
       data: { ...dto, updatedById: user.id },
-      include: CASE_INCLUDE,
+      select: { id: true },
     });
+    return this.findWithRelations(id);
+  }
+
+  private findWithRelations(id: string) {
+    return this.prisma.testCase.findUniqueOrThrow({ where: { id }, include: CASE_INCLUDE });
   }
 
   async remove(id: string, user: AuthUser): Promise<void> {
