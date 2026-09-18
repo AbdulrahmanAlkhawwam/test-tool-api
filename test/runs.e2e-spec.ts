@@ -61,6 +61,10 @@ describe('Runs (e2e)', () => {
     await createRun({ mode: 'EVERYTHING' }).expect(400);
   });
 
+  it('rejects a run with no selection at all', async () => {
+    await ctx.http().post(`/api/projects/${projectId}/runs`).set(actors.testerAuth).send({ name: 'X run' }).expect(400);
+  });
+
   it('returns run detail with full case definitions', async () => {
     const run = (await createRun({ mode: 'CASES', caseIds: [caseIds[2]] }).expect(201)).body;
     const detail = await ctx.http().get(`/api/runs/${run.id}`).set(actors.testerAuth).expect(200);
@@ -98,5 +102,18 @@ describe('Runs (e2e)', () => {
     const again = await ctx.http().patch(`/api/runs/${run.id}`).set(actors.testerAuth).send({ status: 'COMPLETED' }).expect(409);
     expect(again.body.message).toBe('Run is already completed');
     await ctx.http().patch(`/api/runs/${run.id}`).set(actors.testerAuth).send({ status: 'IN_PROGRESS' }).expect(400);
+  });
+
+  it('completes a run exactly once under concurrent requests', async () => {
+    const run = (await createRun({ mode: 'ALL' }).expect(201)).body;
+
+    const complete = () => ctx.http().patch(`/api/runs/${run.id}`).set(actors.testerAuth).send({ status: 'COMPLETED' });
+    const [first, second] = await Promise.all([complete(), complete()]);
+
+    const statuses = [first.status, second.status].sort();
+    expect(statuses).toEqual([200, 409]);
+    const [ok, conflict] = first.status === 200 ? [first, second] : [second, first];
+    expect(ok.body.status).toBe('COMPLETED');
+    expect(conflict.body.message).toBe('Run is already completed');
   });
 });

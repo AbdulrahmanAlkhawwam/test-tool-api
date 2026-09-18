@@ -1,6 +1,6 @@
 import { Priority } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsArray, IsEnum, IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { IsArray, IsDefined, IsEnum, IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateNested } from 'class-validator';
 
 export const SELECTION_MODES = ['ALL', 'MODULES', 'PRIORITIES', 'CASES'] as const;
 export type SelectionMode = (typeof SELECTION_MODES)[number];
@@ -29,6 +29,7 @@ export class CreateRunDto {
   @IsOptional() @IsString() @MaxLength(100)
   environment?: string;
 
+  @IsDefined()
   @ValidateNested()
   @Type(() => RunSelectionDto)
   selection!: RunSelectionDto;

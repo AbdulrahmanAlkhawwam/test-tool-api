@@ -74,16 +74,30 @@ export class RunsService {
   async update(id: string, dto: UpdateRunDto) {
     const run = await this.prisma.testRun.findUnique({ where: { id } });
     if (!run) throw new NotFoundException('Run not found');
-    if (dto.status === RunStatus.COMPLETED && run.status === RunStatus.COMPLETED) {
-      throw new ConflictException('Run is already completed');
+
+    if (dto.status === RunStatus.COMPLETED) {
+      // Atomic compare-and-swap: only succeeds if the run is still IN_PROGRESS, so two
+      // concurrent completion requests can't both report success (TOCTOU).
+      const { count } = await this.prisma.testRun.updateMany({
+        where: { id, status: RunStatus.IN_PROGRESS },
+        data: {
+          name: dto.name,
+          build: dto.build,
+          environment: dto.environment,
+          status: RunStatus.COMPLETED,
+          completedAt: new Date(),
+        },
+      });
+      if (count === 0) throw new ConflictException('Run is already completed');
+      return this.prisma.testRun.findUniqueOrThrow({ where: { id } });
     }
+
     return this.prisma.testRun.update({
       where: { id },
       data: {
         name: dto.name,
         build: dto.build,
         environment: dto.environment,
-        ...(dto.status === RunStatus.COMPLETED ? { status: RunStatus.COMPLETED, completedAt: new Date() } : {}),
       },
     });
   }
