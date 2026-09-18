@@ -1,0 +1,147 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  TESTER
+}
+
+enum Priority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum RunType {
+  MANUAL
+  AUTOMATED
+}
+
+enum RunStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum ResultStatus {
+  NOT_EXECUTED
+  PASSED
+  FAILED
+  BLOCKED
+  SKIPPED
+}
+
+model User {
+  id              String       @id @default(uuid())
+  name            String
+  email           String       @unique
+  passwordHash    String
+  role            Role         @default(TESTER)
+  active          Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  projectsCreated Project[]    @relation("ProjectCreatedBy")
+  casesCreated    TestCase[]   @relation("CaseCreatedBy")
+  casesUpdated    TestCase[]   @relation("CaseUpdatedBy")
+  runsCreated     TestRun[]    @relation("RunCreatedBy")
+  resultsExecuted TestResult[] @relation("ResultExecutedBy")
+}
+
+model Project {
+  id          String          @id @default(uuid())
+  name        String
+  key         String          @unique
+  description String?
+  createdById String
+  createdBy   User            @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+  archivedAt  DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  modules     ProjectModule[]
+  testCases   TestCase[]
+  runs        TestRun[]
+}
+
+model ProjectModule {
+  id        String     @id @default(uuid())
+  projectId String
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  code      String
+  createdAt DateTime   @default(now())
+  testCases TestCase[]
+
+  @@unique([projectId, code])
+}
+
+model TestCase {
+  id             String        @id @default(uuid())
+  projectId      String
+  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  moduleId       String
+  module         ProjectModule @relation(fields: [moduleId], references: [id], onDelete: Restrict)
+  code           String
+  name           String
+  description    String?
+  preconditions  String?
+  steps          String?
+  testData       String?
+  expectedResult String?
+  priority       Priority      @default(MEDIUM)
+  notes          String?
+  createdById    String
+  createdBy      User          @relation("CaseCreatedBy", fields: [createdById], references: [id])
+  updatedById    String
+  updatedBy      User          @relation("CaseUpdatedBy", fields: [updatedById], references: [id])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  deletedAt      DateTime?
+  results        TestResult[]
+
+  @@unique([projectId, code])
+  @@index([projectId, moduleId])
+}
+
+model TestRun {
+  id          String       @id @default(uuid())
+  projectId   String
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  build       String?
+  environment String?
+  type        RunType      @default(MANUAL)
+  status      RunStatus    @default(IN_PROGRESS)
+  createdById String
+  createdBy   User         @relation("RunCreatedBy", fields: [createdById], references: [id])
+  startedAt   DateTime     @default(now())
+  completedAt DateTime?
+  results     TestResult[]
+
+  @@index([projectId, startedAt])
+}
+
+model TestResult {
+  id           String       @id @default(uuid())
+  runId        String
+  run          TestRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  testCaseId   String?
+  testCase     TestCase?    @relation(fields: [testCaseId], references: [id], onDelete: Restrict)
+  title        String?
+  status       ResultStatus @default(NOT_EXECUTED)
+  actualResult String?
+  notes        String?
+  durationMs   Int?
+  errorMessage String?
+  errorStack   String?
+  executedById String?
+  executedBy   User?        @relation("ResultExecutedBy", fields: [executedById], references: [id])
+  executedAt   DateTime?
+  updatedAt    DateTime     @updatedAt
+
+  @@unique([runId, testCaseId])
+  @@index([testCaseId])
+}
