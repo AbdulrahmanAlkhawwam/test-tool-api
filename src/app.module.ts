@@ -6,6 +6,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { ImportExportModule } from './modules/import-export/import-export.module';
 import { ProjectModulesModule } from './modules/project-modules/project-modules.module';
 import { ProjectsModule } from './modules/projects/projects.module';
+import { ReportsModule } from './modules/reports/reports.module';
 import { RunsModule } from './modules/runs/runs.module';
 import { TestCasesModule } from './modules/test-cases/test-cases.module';
 import { UsersModule } from './modules/users/users.module';
@@ -22,6 +23,7 @@ import { PrismaModule } from './prisma/prisma.module';
     TestCasesModule,
     RunsModule,
     ImportExportModule,
+    ReportsModule,
   ],
   controllers: [HealthController],
 })

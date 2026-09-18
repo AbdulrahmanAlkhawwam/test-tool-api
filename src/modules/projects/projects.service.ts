@@ -1,5 +1,6 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Project } from '@prisma/client';
+import { Prisma, Project } from '@prisma/client';
+import { loadRunSummaries } from '../../common/run-summary';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateProjectDto } from './dto/create-project.dto';
@@ -21,6 +22,26 @@ export class ProjectsService {
       orderBy: { name: 'asc' },
       include: { _count: { select: { testCases: { where: { deletedAt: null } } } } },
     });
+    const ids = projects.map((p) => p.id);
+    if (!ids.length) return [];
+
+    const latestRuns = await this.prisma.testRun.findMany({
+      where: { projectId: { in: ids } },
+      orderBy: { startedAt: 'desc' },
+      distinct: ['projectId'],
+      select: { id: true, name: true, status: true, startedAt: true, projectId: true },
+    });
+    const summaries = await loadRunSummaries(this.prisma, latestRuns.map((r) => r.id));
+    const runByProject = new Map(latestRuns.map(({ projectId, ...r }) => [projectId, { ...r, summary: summaries.get(r.id)! }]));
+
+    const lastTested = await this.prisma.$queryRaw<{ projectId: string; lastTestedAt: Date }[]>`
+      SELECT t."projectId" AS "projectId", MAX(r."executedAt") AS "lastTestedAt"
+      FROM "TestResult" r
+      JOIN "TestRun" t ON t.id = r."runId"
+      WHERE t."projectId" IN (${Prisma.join(ids)}) AND r."executedAt" IS NOT NULL
+      GROUP BY t."projectId"`;
+    const lastTestedByProject = new Map(lastTested.map((l) => [l.projectId, l.lastTestedAt]));
+
     return projects.map(({ _count, ...p }) => ({
       id: p.id,
       name: p.name,
@@ -29,6 +50,8 @@ export class ProjectsService {
       archivedAt: p.archivedAt,
       createdAt: p.createdAt,
       caseCount: _count.testCases,
+      latestRun: runByProject.get(p.id) ?? null,
+      lastTestedAt: lastTestedByProject.get(p.id) ?? null,
     }));
   }
 
