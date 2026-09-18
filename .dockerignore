@@ -6,3 +6,6 @@ coverage
 docs
 test
 *.tsbuildinfo
+.git
+.superpowers
+*.log

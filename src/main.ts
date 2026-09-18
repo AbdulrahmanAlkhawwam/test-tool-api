@@ -7,6 +7,8 @@ import { configureApp } from './app.setup';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   configureApp(app);
+  // Run onModuleDestroy (Prisma disconnect) on SIGTERM from `docker stop` / redeploys.
+  app.enableShutdownHooks();
 
   const document = SwaggerModule.createDocument(
     app,
