@@ -2,7 +2,7 @@ import { Body, Controller, Get, HttpCode, Post, Req, Res, UseGuards } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { ThrottlerGuard } from '@nestjs/throttler';
-import type { Request, Response } from 'express';
+import type { CookieOptions, Request, Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { AuthUser } from '../../common/types/auth-user';
@@ -44,7 +44,9 @@ export class AuthController {
   @Post('logout')
   @HttpCode(204)
   logout(@Res({ passthrough: true }) res: Response): void {
-    res.clearCookie(REFRESH_COOKIE, { path: COOKIE_PATH });
+    // Browsers only drop the cookie when the clearing Set-Cookie carries matching attributes
+    // (e.g. SameSite=None requires Secure), so reuse the options the cookie was set with.
+    res.clearCookie(REFRESH_COOKIE, this.cookieOptions());
   }
 
   @ApiBearerAuth()
@@ -55,11 +57,17 @@ export class AuthController {
 
   private setRefreshCookie(res: Response, token: string): void {
     res.cookie(REFRESH_COOKIE, token, {
+      ...this.cookieOptions(),
+      maxAge: this.config.getOrThrow<number>('jwt.refreshTtlDays') * 24 * 60 * 60 * 1000,
+    });
+  }
+
+  private cookieOptions(): CookieOptions {
+    return {
       httpOnly: true,
       secure: this.config.get<boolean>('cookie.secure'),
       sameSite: this.config.get<'lax' | 'strict' | 'none'>('cookie.sameSite'),
       path: COOKIE_PATH,
-      maxAge: this.config.getOrThrow<number>('jwt.refreshTtlDays') * 24 * 60 * 60 * 1000,
-    });
+    };
   }
 }

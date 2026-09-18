@@ -79,9 +79,12 @@ describe('Auth (e2e)', () => {
     await ctx.http().post('/api/auth/refresh').set('Cookie', refreshCookie(login)).expect(401);
   });
 
-  it('logout clears the refresh cookie', async () => {
+  it('logout clears the refresh cookie with the same attributes it was set with', async () => {
     const res = await ctx.http().post('/api/auth/logout').expect(204);
     const cookie = (res.headers['set-cookie'] as unknown as string[])[0];
     expect(cookie).toMatch(/^refresh_token=;/);
+    expect(cookie).toMatch(/Path=\/api\/auth/);
+    expect(cookie).toMatch(/HttpOnly/);
+    expect(cookie).toMatch(new RegExp(`SameSite=${process.env.COOKIE_SAMESITE ?? 'lax'}`, 'i'));
   });
 });
