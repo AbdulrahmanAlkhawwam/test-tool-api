@@ -126,6 +126,9 @@ describe('Import (e2e)', () => {
     const noFile = await ctx.http().post(`/api/projects/${projectId}/import/preview`).set(actors.testerAuth).expect(400);
     expect(noFile.body.message).toBe('file is required');
     await preview(Buffer.from('%PDF'), 'cases.pdf').expect(400);
+    const corrupt = await preview(Buffer.from('not really a workbook'), 'cases.xlsx').expect(400);
+    expect(corrupt.body.message).toBe('Could not read the file – make sure it is a valid .xlsx or .csv');
+    await preview(Buffer.from('ID,Test Case Name\n"unclosed'), 'cases.csv').expect(400);
     const noHeader = await preview(await makeXlsx([['foo', 'bar']])).expect(400);
     expect(noHeader.body.message).toBe('Could not find a header row with "ID" and "Test Case Name" columns');
   });
