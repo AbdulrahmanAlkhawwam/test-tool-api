@@ -94,6 +94,8 @@ describe('Runs (e2e)', () => {
     const run = (await createRun({ mode: 'ALL' }).expect(201)).body;
     const renamed = await ctx.http().patch(`/api/runs/${run.id}`).set(actors.testerAuth).send({ name: 'Sprint 12 – RC1' }).expect(200);
     expect(renamed.body.name).toBe('Sprint 12 – RC1');
+    await ctx.http().patch(`/api/runs/${run.id}`).set(actors.testerAuth).send({ name: null }).expect(400);
+    await ctx.http().patch(`/api/runs/${run.id}`).set(actors.testerAuth).send({ status: null }).expect(400);
 
     const done = await ctx.http().patch(`/api/runs/${run.id}`).set(actors.testerAuth).send({ status: 'COMPLETED' }).expect(200);
     expect(done.body.status).toBe('COMPLETED');

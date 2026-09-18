@@ -61,6 +61,15 @@ describe('Projects (e2e)', () => {
     expect((await ctx.http().get('/api/projects').set(actors.adminAuth)).body).toHaveLength(1);
   });
 
+  it('rejects null for required fields and lets null clear the description', async () => {
+    const p = await seedProject(ctx.prisma, actors.admin.id);
+    await ctx.http().patch(`/api/projects/${p.id}`).set(actors.adminAuth).send({ name: null }).expect(400);
+    await ctx.http().patch(`/api/projects/${p.id}`).set(actors.adminAuth).send({ archived: null }).expect(400);
+    await ctx.http().patch(`/api/projects/${p.id}`).set(actors.adminAuth).send({ description: 'Shop' }).expect(200);
+    const res = await ctx.http().patch(`/api/projects/${p.id}`).set(actors.adminAuth).send({ description: null }).expect(200);
+    expect(res.body).toMatchObject({ name: 'Ninja Store', description: null });
+  });
+
   it('gets a project by key (any case) with its modules', async () => {
     const p = await seedProject(ctx.prisma, actors.admin.id);
     const m = await seedModule(ctx.prisma, p.id, { code: 'AUTH', name: 'Authentication' });

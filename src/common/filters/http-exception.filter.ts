@@ -48,6 +48,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
         return { statusCode: 404, error: 'Not Found', message: 'Record not found' };
       }
     }
+    if (exception instanceof Prisma.PrismaClientValidationError) {
+      // Safety net: input that slipped past the DTOs (e.g. null for a required column).
+      return { statusCode: 400, error: 'Bad Request', message: 'Invalid request data' };
+    }
     return { statusCode: 500, error: 'Internal Server Error', message: 'Internal server error' };
   }
 }

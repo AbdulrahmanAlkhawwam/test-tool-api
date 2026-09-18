@@ -1,22 +1,23 @@
 import { Role } from '@prisma/client';
-import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsOptionalNonNull } from '../../../common/decorators/is-optional-non-null.decorator';
 
 export class UpdateUserDto {
-  @IsOptional()
+  @IsOptionalNonNull()
   @IsString()
   @MinLength(2)
   @MaxLength(100)
   name?: string;
 
-  @IsOptional()
+  @IsOptionalNonNull()
   @IsEnum(Role)
   role?: Role;
 
-  @IsOptional()
+  @IsOptionalNonNull()
   @IsBoolean()
   active?: boolean;
 
-  @IsOptional()
+  @IsOptionalNonNull()
   @IsString()
   @MinLength(8)
   @MaxLength(72)

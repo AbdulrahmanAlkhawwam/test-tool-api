@@ -126,6 +126,17 @@ describe('Test cases (e2e)', () => {
     expect(updated.body.updatedBy).toEqual({ id: actors.tester.id, name: 'Tess Tester' });
   });
 
+  it('rejects null for required fields but lets null clear optional text', async () => {
+    const { body: created } = await ctx.http().post(`/api/projects/${projectId}/test-cases`).set(actors.testerAuth)
+      .send({ ...body(), notes: 'temp' }).expect(201);
+    for (const field of ['name', 'moduleId', 'priority']) {
+      const res = await ctx.http().patch(`/api/test-cases/${created.id}`).set(actors.testerAuth).send({ [field]: null }).expect(400);
+      expect(res.body.message).toBe('Validation failed');
+    }
+    const cleared = await ctx.http().patch(`/api/test-cases/${created.id}`).set(actors.testerAuth).send({ notes: null }).expect(200);
+    expect(cleared.body).toMatchObject({ notes: null, name: created.name });
+  });
+
   it('soft-deletes: hidden from lists, still readable, not editable, code never reused', async () => {
     const a = await ctx.http().post(`/api/projects/${projectId}/test-cases`).set(actors.testerAuth).send(body()).expect(201);
     const b = await ctx.http().post(`/api/projects/${projectId}/test-cases`).set(actors.testerAuth).send(body()).expect(201);

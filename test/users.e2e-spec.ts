@@ -69,6 +69,12 @@ describe('Users (e2e)', () => {
     await ctx.http().patch(`/api/users/${actors.admin.id}`).set(actors.adminAuth).send({ role: 'TESTER' }).expect(400);
   });
 
+  it('rejects null for required user fields', async () => {
+    for (const field of ['name', 'role', 'active', 'password']) {
+      await ctx.http().patch(`/api/users/${actors.tester.id}`).set(actors.adminAuth).send({ [field]: null }).expect(400);
+    }
+  });
+
   it('returns 404 for an unknown user', async () => {
     await ctx.http().patch('/api/users/7a1d0c5e-0000-4000-8000-000000000000').set(actors.adminAuth).send({ name: 'Xx' }).expect(404);
   });

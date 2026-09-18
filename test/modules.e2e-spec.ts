@@ -57,6 +57,8 @@ describe('Modules (e2e)', () => {
     const res = await ctx.http().patch(`/api/modules/${auth.id}`).set(actors.testerAuth).send({ name: 'Login & Register' }).expect(200);
     expect(res.body.name).toBe('Login & Register');
     await ctx.http().patch(`/api/modules/${auth.id}`).set(actors.testerAuth).send({ code: 'CART' }).expect(409);
+    await ctx.http().patch(`/api/modules/${auth.id}`).set(actors.testerAuth).send({ name: null }).expect(400);
+    await ctx.http().patch(`/api/modules/${auth.id}`).set(actors.testerAuth).send({ code: null }).expect(400);
   });
 
   it('deletes only modules without test cases', async () => {

@@ -1,5 +1,6 @@
 import { Priority } from '@prisma/client';
 import { IsEnum, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { IsOptionalNonNull } from '../../../common/decorators/is-optional-non-null.decorator';
 
 export class CreateTestCaseDto {
   @IsUUID()
@@ -25,7 +26,7 @@ export class CreateTestCaseDto {
   @IsOptional() @IsString() @MaxLength(5000)
   expectedResult?: string;
 
-  @IsOptional() @IsEnum(Priority)
+  @IsOptionalNonNull() @IsEnum(Priority)
   priority?: Priority;
 
   @IsOptional() @IsString() @MaxLength(5000)

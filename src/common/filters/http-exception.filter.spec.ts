@@ -61,6 +61,14 @@ describe('HttpExceptionFilter', () => {
     expect(run(err).status).toBe(404);
   });
 
+  it('maps Prisma validation errors (e.g. null for a required column) to 400 without leaking details', () => {
+    const err = new Prisma.PrismaClientValidationError('Argument `name` must not be null.', { clientVersion: 'test' });
+    expect(run(err)).toEqual({
+      status: 400,
+      body: { statusCode: 400, error: 'Bad Request', message: 'Invalid request data' },
+    });
+  });
+
   it('hides unexpected errors behind a generic 500', () => {
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);

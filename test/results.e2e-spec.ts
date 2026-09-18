@@ -55,6 +55,13 @@ describe('Results instant save (e2e)', () => {
 
   it('validates the status value', async () => {
     await ctx.http().patch(url).set(actors.testerAuth).send({ status: 'SUCCESSED' }).expect(400);
+    await ctx.http().patch(url).set(actors.testerAuth).send({ status: null }).expect(400);
+  });
+
+  it('clears actual result and notes when sent null', async () => {
+    await ctx.http().patch(url).set(actors.testerAuth).send({ status: 'FAILED', actualResult: 'Crashed', notes: 'Flaky?' }).expect(200);
+    const res = await ctx.http().patch(url).set(actors.testerAuth).send({ actualResult: null, notes: null }).expect(200);
+    expect(res.body).toMatchObject({ status: 'FAILED', actualResult: null, notes: null });
   });
 
   it('returns 404 for a result from another run', async () => {
