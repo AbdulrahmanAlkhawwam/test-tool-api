@@ -2,6 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import ExcelJS from 'exceljs';
 import request from 'supertest';
+import type { Response } from 'superagent';
 import { AppModule } from '../../src/app.module';
 import { configureApp } from '../../src/app.setup';
 import { PrismaService } from '../../src/prisma/prisma.service';
@@ -31,7 +32,7 @@ export async function resetDb(prisma: PrismaService): Promise<void> {
 }
 
 /** supertest parser that collects a binary body (xlsx downloads) into a Buffer. */
-export function binaryParser(res: NodeJS.ReadableStream, cb: (err: Error | null, body: Buffer) => void) {
+export function binaryParser(res: Response, cb: (err: Error | null, body: Buffer) => void) {
   const chunks: Buffer[] = [];
   res.on('data', (chunk: Buffer) => chunks.push(chunk));
   res.on('end', () => cb(null, Buffer.concat(chunks)));
