@@ -89,6 +89,20 @@ describe('Reports (e2e)', () => {
     expect(res.body.recentRuns[0].project).toEqual({ id: projectId, key: 'NINJA', name: 'Ninja Store' });
   });
 
+  it('leaves archived projects out of every dashboard figure', async () => {
+    const archived = await seedProject(ctx.prisma, actors.admin.id, { key: 'OLD', name: 'Old Shop' });
+    const moduleId = (await seedModule(ctx.prisma, archived.id)).id;
+    await seedCase(ctx.prisma, { projectId: archived.id, moduleId, userId: actors.admin.id, code: 'TC-AUTH-001' });
+    await ctx.prisma.testRun.create({
+      data: { projectId: archived.id, name: 'Old run', createdById: actors.admin.id, startedAt: new Date('2026-03-01') },
+    });
+    await ctx.prisma.project.update({ where: { id: archived.id }, data: { archivedAt: new Date() } });
+
+    const res = await ctx.http().get('/api/dashboard').set(actors.testerAuth).expect(200);
+    expect(res.body).toMatchObject({ projectCount: 1, testCaseCount: 3, runsInProgress: 1 });
+    expect(res.body.recentRuns.map((r: { name: string }) => r.name)).toEqual(['Sprint 2', 'Sprint 1']);
+  });
+
   it('returns 404 for reports of an unknown project', async () => {
     await ctx.http().get('/api/projects/7a1d0c5e-0000-4000-8000-000000000000/reports').set(actors.testerAuth).expect(404);
   });

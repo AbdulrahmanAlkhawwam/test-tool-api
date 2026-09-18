@@ -74,11 +74,14 @@ export class ReportsService {
   }
 
   async dashboard() {
+    // Archived projects are hidden from the home page, so none of the figures include them.
+    const activeProject = { archivedAt: null };
     const [projectCount, testCaseCount, runsInProgress, recent] = await Promise.all([
-      this.prisma.project.count({ where: { archivedAt: null } }),
-      this.prisma.testCase.count({ where: { deletedAt: null, project: { archivedAt: null } } }),
-      this.prisma.testRun.count({ where: { status: RunStatus.IN_PROGRESS } }),
+      this.prisma.project.count({ where: activeProject }),
+      this.prisma.testCase.count({ where: { deletedAt: null, project: activeProject } }),
+      this.prisma.testRun.count({ where: { status: RunStatus.IN_PROGRESS, project: activeProject } }),
       this.prisma.testRun.findMany({
+        where: { project: activeProject },
         orderBy: { startedAt: 'desc' },
         take: 5,
         select: {
