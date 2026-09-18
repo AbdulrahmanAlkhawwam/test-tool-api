@@ -48,7 +48,7 @@ describe('Import (e2e)', () => {
   it('confirms: creates the module, keeps IDs, generates missing ones and preserves multi-line steps', async () => {
     const { importId } = (await preview(await makeXlsx(SHEET)).expect(201)).body;
     const res = await confirm({ importId }).expect(201);
-    expect(res.body).toEqual({ created: 4, updated: 0, skipped: 1, runId: null });
+    expect(res.body).toEqual({ created: 4, updated: 0, skipped: 1, runId: null, renamedModules: [] });
 
     const module = await ctx.prisma.projectModule.findUniqueOrThrow({ where: { projectId_code: { projectId, code: 'AUTH' } } });
     expect(module.name).toBe('Authentication');
@@ -79,14 +79,41 @@ describe('Import (e2e)', () => {
     expect(first.summary.duplicates).toBe(1);
     expect(first.rows[0].duplicate).toBe(true);
     expect((await confirm({ importId: first.importId, duplicateStrategy: 'skip' }).expect(201)).body)
-      .toEqual({ created: 3, updated: 0, skipped: 2, runId: null });
+      .toEqual({ created: 3, updated: 0, skipped: 2, runId: null, renamedModules: [] });
     expect((await ctx.prisma.testCase.findFirstOrThrow({ where: { code: 'TC-AUTH-001' } })).name).toBe('Old name');
 
     const second = (await preview(await makeXlsx(SHEET)).expect(201)).body;
     expect((await confirm({ importId: second.importId, duplicateStrategy: 'update' }).expect(201)).body)
-      .toEqual({ created: 1, updated: 3, skipped: 1, runId: null });
+      .toEqual({ created: 1, updated: 3, skipped: 1, runId: null, renamedModules: [] });
     const updated = await ctx.prisma.testCase.findFirstOrThrow({ where: { code: 'TC-AUTH-001' } });
     expect(updated).toMatchObject({ name: 'Login with Realy user (Email)', updatedById: actors.tester.id });
+  });
+
+  it('gives a module whose derived code is taken by a different module the next free code', async () => {
+    const um = await seedModule(ctx.prisma, projectId, { code: 'UM', name: 'User Management' });
+    await seedCase(ctx.prisma, { projectId, moduleId: um.id, userId: actors.admin.id, code: 'TC-UM-001' });
+    const sheet = [
+      HEADER,
+      ['', 'Unit Measure', 'Convert kg to g', '', '', '', '', 'Shows 1000 g', '', 'Low', '', ''],
+      ['', 'unit measure', 'Convert m to cm', '', '', '', '', 'Shows 100 cm', '', 'Low', '', ''],
+      ['', 'User Management', 'Invite a user', '', '', '', '', 'Invite sent', '', 'High', '', ''],
+    ];
+    const { importId } = (await preview(await makeXlsx(sheet)).expect(201)).body;
+    const res = await confirm({ importId }).expect(201);
+    expect(res.body).toEqual({ created: 3, updated: 0, skipped: 0, runId: null, renamedModules: [{ name: 'Unit Measure', code: 'UM2' }] });
+
+    const modules = await ctx.prisma.projectModule.findMany({ where: { projectId }, orderBy: { code: 'asc' } });
+    expect(modules.map((m) => [m.code, m.name])).toEqual([['UM', 'User Management'], ['UM2', 'Unit Measure']]);
+    const cases = await ctx.prisma.testCase.findMany({ where: { projectId }, orderBy: { code: 'asc' }, include: { module: true } });
+    expect(cases.map((c) => [c.code, c.module.code])).toEqual([
+      ['TC-UM-001', 'UM'], ['TC-UM-002', 'UM'], ['TC-UM2-001', 'UM2'], ['TC-UM2-002', 'UM2'],
+    ]);
+  });
+
+  it('rejects null import options', async () => {
+    const { importId } = (await preview(await makeXlsx(SHEET)).expect(201)).body;
+    await confirm({ importId, duplicateStrategy: null }).expect(400);
+    await confirm({ importId, createImportedRun: null }).expect(400);
   });
 
   it('imports csv files', async () => {

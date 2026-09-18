@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { deriveModuleCode, mapPriority, mapStatus, parseImportRows } from './import.parser';
+import { deriveModuleCode, mapPriority, mapStatus, parseImportRows, uniqueModuleCode } from './import.parser';
 
 const HEADER = ['ID', 'Module', 'Test Case Name', 'Description', 'Preconditions', 'Test Steps', 'Test Data', 'Expected Result', 'Actual Result', 'Priority', 'Status ', 'Notes'];
 
@@ -37,6 +37,21 @@ describe('deriveModuleCode', () => {
   });
   it('falls back to MOD', () => {
     expect(deriveModuleCode('!!!')).toBe('MOD');
+  });
+});
+
+describe('uniqueModuleCode', () => {
+  it('returns the base code when free, else the smallest free numeric suffix', () => {
+    expect(uniqueModuleCode('UM', () => false)).toBe('UM');
+    const taken = new Set(['UM', 'UM2']);
+    expect(uniqueModuleCode('UM', (c) => taken.has(c))).toBe('UM3');
+  });
+
+  it('keeps codes within 10 characters', () => {
+    const taken = new Set(['ABCDEFGHIJ', 'ABCDEFGHI2']);
+    expect(uniqueModuleCode('ABCDEFGHIJ', (c) => taken.has(c))).toBe('ABCDEFGHI3');
+    const many = new Set(['ABCDEFGHIJ', ...Array.from({ length: 8 }, (_, i) => `ABCDEFGHI${i + 2}`)]);
+    expect(uniqueModuleCode('ABCDEFGHIJ', (c) => many.has(c))).toBe('ABCDEFGH10');
   });
 });
 
@@ -103,6 +118,43 @@ describe('parseImportRows', () => {
     ]);
     expect(rows[1].moduleCode).toBe('LOGIN');
     expect(rows[1].warnings).toEqual(['ID prefix "AUTH" differs from module code "LOGIN" – module "Authentication" will use "LOGIN"']);
+  });
+
+  it('gives different module names with the same derived code a numeric suffix and warns', () => {
+    const rows = parseImportRows([
+      HEADER,
+      ['', 'User Management', 'A', '', '', '', '', '', '', 'High', '', ''],
+      ['', 'Unit Measure', 'B', '', '', '', '', '', '', 'High', '', ''],
+      ['', 'unit measure', 'C', '', '', '', '', '', '', 'High', '', ''],
+      ['', 'Upload Manager', 'D', '', '', '', '', '', '', 'High', '', ''],
+    ]);
+    expect(rows.map((r) => r.moduleCode)).toEqual(['UM', 'UM2', 'UM2', 'UM3']);
+    expect(rows.every((r) => r.moduleCodeDerived)).toBe(true);
+    expect(rows[0].warnings).toEqual(['ID is empty – one will be generated']);
+    expect(rows[1].warnings).toContain('Module code "UM" is used by "User Management" – "Unit Measure" will use "UM2"');
+    expect(rows[2].warnings).toEqual(['ID is empty – one will be generated']);
+    expect(rows[3].warnings).toContain('Module code "UM" is used by "User Management" – "Upload Manager" will use "UM3"');
+  });
+
+  it('does not merge non-Latin module names that all fall back to MOD', () => {
+    const rows = parseImportRows([
+      HEADER,
+      ['', 'المصادقة', 'A', '', '', '', '', '', '', 'High', '', ''],
+      ['', 'سلة التسوق', 'B', '', '', '', '', '', '', 'High', '', ''],
+      ['', 'المصادقة', 'C', '', '', '', '', '', '', 'High', '', ''],
+    ]);
+    expect(rows.map((r) => r.moduleCode)).toEqual(['MOD', 'MOD2', 'MOD']);
+    expect(rows[1].warnings).toContain('Module code "MOD" is used by "المصادقة" – "سلة التسوق" will use "MOD2"');
+  });
+
+  it('avoids codes already claimed by ID prefixes and keeps prefixed codes unchanged', () => {
+    const rows = parseImportRows([
+      HEADER,
+      ['TC-UM-001', 'User Management', 'A', '', '', '', '', '', '', 'High', '', ''],
+      ['', 'Unit Measure', 'B', '', '', '', '', '', '', 'High', '', ''],
+    ]);
+    expect(rows[0]).toMatchObject({ moduleCode: 'UM', moduleCodeDerived: false });
+    expect(rows[1]).toMatchObject({ moduleCode: 'UM2', moduleCodeDerived: true });
   });
 
   it('throws when no header row is found', () => {

@@ -26,6 +26,8 @@ export interface ImportRow {
   code: string | null;
   moduleName: string;
   moduleCode: string;
+  /** True when moduleCode was derived from the module name (no ID prefix to take it from). */
+  moduleCodeDerived: boolean;
   name: string;
   description: string | null;
   preconditions: string | null;
@@ -73,6 +75,19 @@ export function deriveModuleCode(moduleName: string): string {
   return words.map((w) => w[0]).join('').slice(0, 10);
 }
 
+/**
+ * Returns `base` if it is free, otherwise `base` + the smallest numeric suffix (2, 3, …) that is
+ * free, trimming `base` so the result stays within the 10-character module code limit.
+ */
+export function uniqueModuleCode(base: string, isTaken: (code: string) => boolean): string {
+  if (!isTaken(base)) return base;
+  for (let n = 2; ; n++) {
+    const suffix = String(n);
+    const candidate = base.slice(0, 10 - suffix.length) + suffix;
+    if (!isTaken(candidate)) return candidate;
+  }
+}
+
 export function parseImportRows(table: string[][]): ImportRow[] {
   const headerIndex = table.slice(0, 10).findIndex((row) => {
     const names = row.map((c) => normalizeHeader(c ?? ''));
@@ -84,7 +99,8 @@ export function parseImportRows(table: string[][]): ImportRow[] {
   const columns = table[headerIndex].map((c) => HEADER_MAP[normalizeHeader(c ?? '')]);
 
   const seenCodes = new Set<string>();
-  const moduleCodes = new Map<string, string>(); // lower-cased module name → code
+  const moduleCodes = new Map<string, { code: string; derived: boolean }>(); // lower-cased module name → code
+  const codeOwners = new Map<string, string>(); // module code → module name that claimed it first
   const rows: ImportRow[] = [];
 
   for (let i = headerIndex + 1; i < table.length; i++) {
@@ -94,7 +110,7 @@ export function parseImportRows(table: string[][]): ImportRow[] {
       if (field) raw[field] = (cell ?? '').trim();
     });
     if (Object.values(raw).every((v) => !v)) continue;
-    rows.push(buildRow(raw, i + 1, seenCodes, moduleCodes));
+    rows.push(buildRow(raw, i + 1, seenCodes, moduleCodes, codeOwners));
   }
   return rows;
 }
@@ -103,7 +119,8 @@ function buildRow(
   raw: Partial<Record<Field, string>>,
   rowNumber: number,
   seenCodes: Set<string>,
-  moduleCodes: Map<string, string>,
+  moduleCodes: Map<string, { code: string; derived: boolean }>,
+  codeOwners: Map<string, string>,
 ): ImportRow {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -132,12 +149,26 @@ function buildRow(
   }
 
   const moduleKey = moduleName.toLowerCase();
-  let moduleCode = moduleCodes.get(moduleKey);
-  if (!moduleCode) {
-    moduleCode = prefix ?? deriveModuleCode(moduleName);
-    if (moduleName) moduleCodes.set(moduleKey, moduleCode);
-  } else if (prefix && prefix !== moduleCode) {
-    warnings.push(`ID prefix "${prefix}" differs from module code "${moduleCode}" – module "${moduleName}" will use "${moduleCode}"`);
+  let module = moduleCodes.get(moduleKey);
+  if (!module) {
+    if (prefix) {
+      module = { code: prefix, derived: false };
+    } else {
+      // Derived codes can collide (different names with the same initials, or non-Latin names
+      // that all fall back to "MOD"): never let two module names silently share one code.
+      const derived = deriveModuleCode(moduleName);
+      const code = moduleName ? uniqueModuleCode(derived, (c) => codeOwners.has(c)) : derived;
+      if (code !== derived) {
+        warnings.push(`Module code "${derived}" is used by "${codeOwners.get(derived)}" – "${moduleName}" will use "${code}"`);
+      }
+      module = { code, derived: true };
+    }
+    if (moduleName) {
+      moduleCodes.set(moduleKey, module);
+      if (!codeOwners.has(module.code)) codeOwners.set(module.code, moduleName);
+    }
+  } else if (prefix && prefix !== module.code) {
+    warnings.push(`ID prefix "${prefix}" differs from module code "${module.code}" – module "${moduleName}" will use "${module.code}"`);
   }
 
   let priority = mapPriority(raw.priority ?? '');
@@ -153,7 +184,8 @@ function buildRow(
     rowNumber,
     code,
     moduleName,
-    moduleCode,
+    moduleCode: module.code,
+    moduleCodeDerived: module.derived,
     name,
     description: text('description'),
     preconditions: text('preconditions'),

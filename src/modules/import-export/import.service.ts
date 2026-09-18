@@ -5,7 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
 import { nextCaseCode } from '../test-cases/case-code';
 import { ConfirmImportDto } from './dto/confirm-import.dto';
-import { parseImportRows } from './import.parser';
+import { deriveModuleCode, parseImportRows, uniqueModuleCode } from './import.parser';
 import { ImportStore, PreviewRow } from './import.store';
 import { readTabular } from './tabular-reader';
 
@@ -43,7 +43,7 @@ export class ImportService {
 
     return this.prisma.$transaction(
       async (tx) => {
-        const moduleIds = await this.ensureModules(tx, projectId, rows);
+        const { modules, renamedModules } = await this.ensureModules(tx, projectId, rows);
         const existing = new Map(
           (await tx.testCase.findMany({ where: { projectId }, select: { id: true, code: true } })).map((c) => [c.code, c.id]),
         );
@@ -67,7 +67,7 @@ export class ImportService {
             expectedResult: row.expectedResult,
             priority: row.priority,
             notes: row.notes,
-            moduleId: moduleIds.get(row.moduleCode)!,
+            moduleId: modules.get(row.moduleCode)!.id,
             updatedById: user.id,
           };
           const existingId = row.code ? existing.get(row.code) : undefined;
@@ -81,7 +81,7 @@ export class ImportService {
             updated++;
             continue;
           }
-          const code = row.code ?? nextCaseCode(row.moduleCode, allCodes);
+          const code = row.code ?? nextCaseCode(modules.get(row.moduleCode)!.code, allCodes);
           allCodes.add(code);
           const testCase = await tx.testCase.create({ data: { ...fields, code, projectId, createdById: user.id } });
           imported.push({ caseId: testCase.id, row });
@@ -115,26 +115,58 @@ export class ImportService {
           });
           runId = run.id;
         }
-        return { created, updated, skipped, runId };
+        return { created, updated, skipped, runId, renamedModules };
       },
       { timeout: 60_000 },
     );
   }
 
-  /** Finds or creates one module per module code used by valid rows; returns code → module id. */
+  /**
+   * Finds or creates one module per module code used by valid rows.
+   * Returns file code → resolved module, plus the modules that had to get a different code.
+   *
+   * A code taken from an ID prefix (TC-AUTH-001) always maps to that project module. A code
+   * derived from the module name (rows without an ID) first matches a project module with the
+   * same name (case-insensitive); otherwise, if the derived code already belongs to a module
+   * with a different name, the new module gets the next free numeric suffix (UM → UM2)
+   * instead of being merged into it silently.
+   */
   private async ensureModules(tx: Prisma.TransactionClient, projectId: string, rows: PreviewRow[]) {
-    const wanted = new Map<string, string>(); // code → name
-    for (const r of rows) if (!r.errors.length && !wanted.has(r.moduleCode)) wanted.set(r.moduleCode, r.moduleName);
-
-    const ids = new Map<string, string>();
-    for (const [code, name] of wanted) {
-      const module = await tx.projectModule.upsert({
-        where: { projectId_code: { projectId, code } },
-        update: {},
-        create: { projectId, code, name },
-      });
-      ids.set(code, module.id);
+    const wanted = new Map<string, { name: string; derived: boolean }>(); // file code → module
+    for (const r of rows) {
+      if (!r.errors.length && !wanted.has(r.moduleCode)) wanted.set(r.moduleCode, { name: r.moduleName, derived: r.moduleCodeDerived });
     }
-    return ids;
+
+    const existing = await tx.projectModule.findMany({ where: { projectId }, select: { id: true, code: true, name: true } });
+    const byCode = new Map(existing.map((m) => [m.code, m]));
+    const byName = new Map(existing.map((m) => [m.name.toLowerCase(), m]));
+
+    const modules = new Map<string, { id: string; code: string }>();
+    const collisions: { code: string; name: string }[] = [];
+    for (const [code, { name, derived }] of wanted) {
+      const sameName = derived ? byName.get(name.toLowerCase()) : undefined;
+      const sameCode = byCode.get(code);
+      if (sameName) {
+        modules.set(code, { id: sameName.id, code: sameName.code });
+      } else if (sameCode && !derived) {
+        modules.set(code, { id: sameCode.id, code });
+      } else if (sameCode) {
+        collisions.push({ code, name }); // resolved below, once every other code is known
+      } else {
+        const created = await tx.projectModule.create({ data: { projectId, code, name } });
+        byCode.set(code, created);
+        modules.set(code, { id: created.id, code });
+      }
+    }
+
+    const renamedModules: { name: string; code: string }[] = [];
+    for (const { code, name } of collisions) {
+      const newCode = uniqueModuleCode(deriveModuleCode(name), (c) => byCode.has(c));
+      const created = await tx.projectModule.create({ data: { projectId, code: newCode, name } });
+      byCode.set(newCode, created);
+      modules.set(code, { id: created.id, code: newCode });
+      renamedModules.push({ name, code: newCode });
+    }
+    return { modules, renamedModules };
   }
 }
