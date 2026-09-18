@@ -26,6 +26,12 @@ export async function createTestApp(): Promise<TestContext> {
 }
 
 export async function resetDb(prisma: PrismaService): Promise<void> {
+  // Refuse to wipe anything but a dedicated test database (e.g. when .env.test is missing
+  // and DATABASE_URL falls back to the development database).
+  const dbName = decodeURIComponent(new URL(process.env.DATABASE_URL ?? 'postgresql://unset/').pathname.slice(1));
+  if (!dbName.endsWith('_test')) {
+    throw new Error(`resetDb refuses to truncate database "${dbName}": its name must end with "_test"`);
+  }
   await prisma.$executeRawUnsafe(
     'TRUNCATE "TestResult", "TestRun", "TestCase", "ProjectModule", "Project", "User" RESTART IDENTITY CASCADE',
   );
