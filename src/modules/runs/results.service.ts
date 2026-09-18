@@ -9,27 +9,30 @@ export class ResultsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async update(runId: string, resultId: string, dto: UpdateResultDto, user: AuthUser) {
-    const result = await this.prisma.testResult.findFirst({
-      where: { id: resultId, runId },
-      include: { run: { select: { status: true } } },
-    });
-    if (!result) throw new NotFoundException('Result not found in this run');
-    if (result.run.status === RunStatus.COMPLETED) {
-      throw new ConflictException('Run is completed – results are read-only');
-    }
+    return this.prisma.$transaction(async (tx) => {
+      // Share-lock the run row so a concurrent completion (which locks it FOR UPDATE)
+      // either waits for this save to commit or makes this save see COMPLETED.
+      const [run] = await tx.$queryRaw<{ status: RunStatus }[]>`
+        SELECT status FROM "TestRun" WHERE id = ${runId} FOR SHARE`;
+      const result = run && (await tx.testResult.findFirst({ where: { id: resultId, runId } }));
+      if (!result) throw new NotFoundException('Result not found in this run');
+      if (run.status === RunStatus.COMPLETED) {
+        throw new ConflictException('Run is completed – results are read-only');
+      }
 
-    const status = dto.status ?? result.status;
-    const executed = status !== ResultStatus.NOT_EXECUTED;
-    return this.prisma.testResult.update({
-      where: { id: resultId },
-      data: {
-        status,
-        actualResult: dto.actualResult,
-        notes: dto.notes,
-        executedById: executed ? user.id : null,
-        executedAt: executed ? new Date() : null,
-      },
-      include: { executedBy: { select: { id: true, name: true } } },
+      const status = dto.status ?? result.status;
+      const executed = status !== ResultStatus.NOT_EXECUTED;
+      return tx.testResult.update({
+        where: { id: resultId },
+        data: {
+          status,
+          actualResult: dto.actualResult,
+          notes: dto.notes,
+          executedById: executed ? user.id : null,
+          executedAt: executed ? new Date() : null,
+        },
+        include: { executedBy: { select: { id: true, name: true } } },
+      });
     });
   }
 }

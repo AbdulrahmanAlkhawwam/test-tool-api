@@ -8,6 +8,7 @@ describe('Results instant save (e2e)', () => {
   let runId: string;
   let resultId: string;
   let url: string;
+  let projectId: string;
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -15,7 +16,7 @@ describe('Results instant save (e2e)', () => {
   beforeEach(async () => {
     await resetDb(ctx.prisma);
     actors = await seedActors(ctx);
-    const projectId = (await seedProject(ctx.prisma, actors.admin.id)).id;
+    projectId = (await seedProject(ctx.prisma, actors.admin.id)).id;
     const moduleId = (await seedModule(ctx.prisma, projectId)).id;
     await seedCase(ctx.prisma, { projectId, moduleId, userId: actors.admin.id, code: 'TC-AUTH-001' });
     const run = await ctx.http().post(`/api/projects/${projectId}/runs`).set(actors.testerAuth)
@@ -65,5 +66,33 @@ describe('Results instant save (e2e)', () => {
     await ctx.prisma.testRun.update({ where: { id: runId }, data: { status: RunStatus.COMPLETED, completedAt: new Date() } });
     const res = await ctx.http().patch(url).set(actors.testerAuth).send({ status: 'PASSED' }).expect(409);
     expect(res.body.message).toBe('Run is completed – results are read-only');
+  });
+
+  it('never lets a result save land after the run is completed (concurrent save vs. completion)', async () => {
+    const outcomes = { saved: 0, rejected: 0 };
+    for (let i = 0; i < 10; i++) {
+      const run = await ctx.http().post(`/api/projects/${projectId}/runs`).set(actors.testerAuth)
+        .send({ name: `Race ${i}`, selection: { mode: 'ALL' } }).expect(201);
+      const result = await ctx.prisma.testResult.findFirstOrThrow({ where: { runId: run.body.id } });
+
+      const [save, complete] = await Promise.all([
+        ctx.http().patch(`/api/runs/${run.body.id}/results/${result.id}`).set(actors.testerAuth).send({ status: 'PASSED' }),
+        ctx.http().patch(`/api/runs/${run.body.id}`).set(actors.adminAuth).send({ status: 'COMPLETED' }),
+      ]);
+
+      expect(complete.status).toBe(200);
+      const { completedAt } = await ctx.prisma.testRun.findUniqueOrThrow({ where: { id: run.body.id } });
+      const stored = await ctx.prisma.testResult.findUniqueOrThrow({ where: { id: result.id } });
+      if (save.status === 200) {
+        outcomes.saved++;
+        expect(new Date(save.body.executedAt).getTime()).toBeLessThanOrEqual(completedAt!.getTime());
+        expect(stored.status).toBe('PASSED');
+      } else {
+        outcomes.rejected++;
+        expect(save.status).toBe(409);
+        expect(stored).toMatchObject({ status: 'NOT_EXECUTED', executedAt: null });
+      }
+    }
+    expect(outcomes.saved + outcomes.rejected).toBe(10);
   });
 });

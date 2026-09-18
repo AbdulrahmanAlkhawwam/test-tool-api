@@ -76,19 +76,26 @@ export class RunsService {
     if (!run) throw new NotFoundException('Run not found');
 
     if (dto.status === RunStatus.COMPLETED) {
-      // Atomic compare-and-swap: only succeeds if the run is still IN_PROGRESS, so two
-      // concurrent completion requests can't both report success (TOCTOU).
-      const { count } = await this.prisma.testRun.updateMany({
-        where: { id, status: RunStatus.IN_PROGRESS },
-        data: {
-          name: dto.name,
-          build: dto.build,
-          environment: dto.environment,
-          status: RunStatus.COMPLETED,
-          completedAt: new Date(),
-        },
+      // Lock the run row FOR UPDATE before checking the status: concurrent completions
+      // serialize (only one succeeds), and in-flight result saves (which hold FOR SHARE)
+      // finish first. completedAt is stamped after the lock, so it is never earlier than
+      // the executedAt of any result saved before completion.
+      await this.prisma.$transaction(async (tx) => {
+        const [locked] = await tx.$queryRaw<{ status: RunStatus }[]>`
+          SELECT status FROM "TestRun" WHERE id = ${id} FOR UPDATE`;
+        if (locked?.status !== RunStatus.IN_PROGRESS) throw new ConflictException('Run is already completed');
+        await tx.testRun.update({
+          where: { id },
+          data: {
+            name: dto.name,
+            build: dto.build,
+            environment: dto.environment,
+            status: RunStatus.COMPLETED,
+            completedAt: new Date(),
+          },
+          select: { id: true },
+        });
       });
-      if (count === 0) throw new ConflictException('Run is already completed');
       return this.prisma.testRun.findUniqueOrThrow({ where: { id } });
     }
 
