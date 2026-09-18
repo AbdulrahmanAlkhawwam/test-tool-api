@@ -47,6 +47,7 @@ doesn't exist yet) and starts the API on port 3000.
 | `CORS_ORIGIN` | `https://tests.ejad.example` (comma-separated for several) |
 | `COOKIE_SECURE` | `true` behind HTTPS |
 | `COOKIE_SAMESITE` | `lax` if web and API share a site, `none` if they are on different sites |
+| `TRUST_PROXY` | `1` behind Dokploy/Traefik (proxy hops to trust, or `true`/`false`); unset = don't trust proxies. Without it every user shares the proxy's IP and one login rate-limit bucket |
 | `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_ADMIN_NAME` | first admin account |
 
 Import previews are held in memory for 30 minutes, so run a **single** API container.
