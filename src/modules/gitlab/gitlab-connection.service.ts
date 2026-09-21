@@ -1,6 +1,6 @@
-import { BadGatewayException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GitlabConnection, GitlabConnectionState } from '@prisma/client';
+import { GitlabConnection, GitlabConnectionState, Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
 import { sha256Hex, TokenCipher } from '../../common/crypto/token-cipher';
 import { GitlabConfig } from '../../config/configuration';
@@ -20,6 +20,14 @@ export interface GitlabStatus {
   connection: { username: string; avatarUrl: string | null; state: GitlabConnectionState } | null;
 }
 
+export interface CompleteOAuthResult {
+  status: 'connected';
+  username: string;
+}
+
+/** `reason` is one of invalid_state | denied | exchange_failed | already_linked. */
+export type CompleteOAuthFailureReason = 'invalid_state' | 'denied' | 'exchange_failed' | 'already_linked';
+
 const notConnected = () =>
   new ForbiddenException({ message: 'Connect GitLab to use automation', details: { code: GITLAB_NOT_CONNECTED } });
 const needsReconnect = () =>
@@ -27,9 +35,13 @@ const needsReconnect = () =>
     message: 'Your GitLab connection expired – reconnect GitLab to continue',
     details: { code: GITLAB_NEEDS_RECONNECT },
   });
+const completionFailed = (reason: CompleteOAuthFailureReason) =>
+  new BadRequestException({ message: 'Could not connect GitLab', details: { reason } });
 
 @Injectable()
 export class GitlabConnectionService {
+  private readonly logger = new Logger(GitlabConnectionService.name);
+
   /** One refresh in flight per user: GitLab refresh tokens are single-use (single API instance). */
   private readonly refreshing = new Map<string, Promise<string>>();
 
@@ -56,8 +68,9 @@ export class GitlabConnectionService {
     const verifier = randomBytes(48).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
     const now = new Date();
+    // Drop expired states, and this user's other unused ones: only the newest link they started works.
     await this.prisma.gitlabOAuthState.deleteMany({
-      where: { OR: [{ expiresAt: { lt: now } }, { userId, usedAt: { not: null } }] },
+      where: { OR: [{ expiresAt: { lt: now } }, { userId, usedAt: null }] },
     });
     await this.prisma.gitlabOAuthState.create({
       data: {
@@ -78,20 +91,27 @@ export class GitlabConnectionService {
     return { authorizeUrl: url.toString() };
   }
 
-  /** Handles the browser redirect from GitLab and returns where to send the browser next. */
-  async completeOAuth(params: { code?: string; state?: string; error?: string }): Promise<string> {
-    const fail = (reason: string) => `${this.cfg.webUrl}/profile?gitlab=error&reason=${reason}`;
-    if (!params.state) return fail('invalid_state');
+  /**
+   * Completes the OAuth flow for the signed-in user. GitLab redirects the browser to
+   * `WEB_URL/gitlab/callback`; the web app then calls this endpoint with the code/state.
+   * Requiring the caller to be authenticated as the state's own owner (rather than accepting a
+   * public, stateless callback) stops one tool user from linking another's GitLab tokens to their
+   * own account by sending them their `authorizeUrl` — the state is looked up but never consumed
+   * when it belongs to someone else, so its rightful owner can still complete it afterwards.
+   */
+  async completeOAuth(userId: string, params: { code?: string; state: string; error?: string }): Promise<CompleteOAuthResult> {
     const row = await this.prisma.gitlabOAuthState.findUnique({ where: { stateHash: sha256Hex(params.state) } });
-    if (!row) return fail('invalid_state');
-    // Claim the state atomically: only one callback can use it, and only before it expires.
+    if (!row || row.userId !== userId) throw completionFailed('invalid_state');
+
+    // Claim the state atomically: only one call can use it, and only before it expires. The
+    // ownership check above already guarantees only the user it was issued for gets this far.
     const now = new Date();
     const claimed = await this.prisma.gitlabOAuthState.updateMany({
       where: { id: row.id, usedAt: null, expiresAt: { gt: now } },
       data: { usedAt: now },
     });
-    if (claimed.count !== 1) return fail('invalid_state');
-    if (params.error || !params.code) return fail('denied');
+    if (claimed.count !== 1) throw completionFailed('invalid_state');
+    if (params.error || !params.code) throw completionFailed('denied');
 
     let tokens: OAuthTokens;
     let gitlabUser: GitlabUser;
@@ -99,9 +119,17 @@ export class GitlabConnectionService {
       tokens = await this.api.exchangeCode(params.code, this.cipher.decrypt(row.codeVerifierEnc));
       gitlabUser = await this.api.getCurrentUser(tokens.accessToken);
     } catch (e) {
-      if (e instanceof GitlabHttpError) return fail('exchange_failed');
-      throw e;
+      if (!(e instanceof GitlabHttpError)) this.logger.error(`GitLab OAuth exchange failed: ${(e as Error).message}`);
+      throw completionFailed('exchange_failed');
     }
+
+    // One GitLab identity can only ever be linked to one tool user.
+    const existing = await this.prisma.gitlabConnection.findUnique({ where: { gitlabUserId: gitlabUser.id } });
+    if (existing && existing.userId !== userId) {
+      await this.api.revokeToken(tokens.accessToken).catch(() => {});
+      throw completionFailed('already_linked');
+    }
+
     const data = {
       gitlabUserId: gitlabUser.id,
       username: gitlabUser.username,
@@ -111,8 +139,18 @@ export class GitlabConnectionService {
       expiresAt: tokens.expiresAt,
       state: GitlabConnectionState.ACTIVE,
     };
-    await this.prisma.gitlabConnection.upsert({ where: { userId: row.userId }, create: { userId: row.userId, ...data }, update: data });
-    return `${this.cfg.webUrl}/profile?gitlab=connected`;
+    try {
+      await this.prisma.gitlabConnection.upsert({ where: { userId }, create: { userId, ...data }, update: data });
+    } catch (e) {
+      // The unique index on gitlabUserId is the real guard: a concurrent completion could have
+      // linked this GitLab identity to someone else between the check above and this write.
+      const isUniqueViolation = e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
+      await this.api.revokeToken(tokens.accessToken).catch(() => {});
+      if (isUniqueViolation) throw completionFailed('already_linked');
+      this.logger.error(`GitLab OAuth completion failed: ${(e as Error).message}`);
+      throw completionFailed('exchange_failed');
+    }
+    return { status: 'connected', username: gitlabUser.username };
   }
 
   async disconnect(userId: string): Promise<void> {

@@ -30,8 +30,8 @@ describe('GitLab disabled (e2e)', () => {
 
   it('hides OAuth, connection and project search endpoints', async () => {
     await expectHidden('get', '/api/gitlab/oauth/start');
+    await expectHidden('post', '/api/gitlab/oauth/complete', { state: 'x' });
     await expectHidden('delete', '/api/gitlab/connection');
     await expectHidden('get', '/api/gitlab/projects?search=ninja');
-    await ctx.http().get('/api/gitlab/oauth/callback').query({ code: 'a', state: 'b' }).expect(404);
   });
 });

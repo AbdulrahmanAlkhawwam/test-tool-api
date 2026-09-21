@@ -1,11 +1,10 @@
-import { Controller, Delete, Get, HttpCode, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Role } from '@prisma/client';
-import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuthUser } from '../../common/types/auth-user';
+import { CompleteOAuthDto } from './dto/complete-oauth.dto';
 import { GitlabApiService } from './gitlab-api.service';
 import { GitlabConnectionService } from './gitlab-connection.service';
 import { GitlabEnabledGuard } from './gitlab-enabled.guard';
@@ -33,17 +32,16 @@ export class GitlabController {
     return this.connections.startOAuth(user.id);
   }
 
-  @Public()
+  /**
+   * The web app calls this after GitLab redirects it to `WEB_URL/gitlab/callback`. This route is
+   * authenticated (not public): binding completion to the signed-in user is what stops one user
+   * from linking another's GitLab tokens to their own account by replaying that user's authorizeUrl.
+   */
   @UseGuards(GitlabEnabledGuard)
-  @Get('oauth/callback')
-  async callback(
-    @Query('code') code: unknown,
-    @Query('state') state: unknown,
-    @Query('error') error: unknown,
-    @Res() res: Response,
-  ): Promise<void> {
-    const target = await this.connections.completeOAuth({ code: asString(code), state: asString(state), error: asString(error) });
-    res.redirect(302, target);
+  @Post('oauth/complete')
+  @HttpCode(200)
+  complete(@Body() dto: CompleteOAuthDto, @CurrentUser() user: AuthUser) {
+    return this.connections.completeOAuth(user.id, dto);
   }
 
   @UseGuards(GitlabEnabledGuard)

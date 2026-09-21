@@ -5,7 +5,8 @@ import { seedActors } from './utils/factories';
 import { createGitlabTestApp, seedGitlabConnection } from './utils/gitlab';
 import { resetDb, TestContext } from './utils/test-app';
 
-const REDIRECT_URI = 'http://localhost:3000/api/gitlab/oauth/callback';
+// GitLab redirects the browser to the WEB app, which then calls POST /api/gitlab/oauth/complete.
+const REDIRECT_URI = 'http://localhost:3001/gitlab/callback';
 
 describe('GitLab connection (e2e)', () => {
   let ctx: TestContext;
@@ -25,10 +26,13 @@ describe('GitLab connection (e2e)', () => {
     await fake.close();
   });
 
-  const startOAuth = async () => {
-    const res = await ctx.http().get('/api/gitlab/oauth/start').set(actors.testerAuth).expect(200);
+  const startOAuth = async (auth = actors.testerAuth) => {
+    const res = await ctx.http().get('/api/gitlab/oauth/start').set(auth).expect(200);
     return new URL(res.body.authorizeUrl as string);
   };
+
+  const complete = (auth: Record<string, string>, body: { code?: string; state: string; error?: string }) =>
+    ctx.http().post('/api/gitlab/oauth/complete').set(auth).send(body);
 
   it('reports the connection status', async () => {
     const before = await ctx.http().get('/api/gitlab/status').set(actors.testerAuth).expect(200);
@@ -58,14 +62,14 @@ describe('GitLab connection (e2e)', () => {
     expect(ttl).toBeLessThanOrEqual(10 * 60_000);
   });
 
-  it('completes the callback, stores encrypted tokens and redirects to the web app', async () => {
+  it('completes the OAuth flow for the signed-in user, storing encrypted tokens', async () => {
     const url = await startOAuth();
     const gitlabUser = fake.addUser({ username: 'tess', avatar_url: 'https://git.test/tess.png' });
     const code = fake.issueAuthCode(gitlabUser, url.searchParams.get('code_challenge')!, REDIRECT_URI);
     const state = url.searchParams.get('state')!;
 
-    const res = await ctx.http().get('/api/gitlab/oauth/callback').query({ code, state }).expect(302);
-    expect(res.headers.location).toBe('http://localhost:3001/profile?gitlab=connected');
+    const res = await complete(actors.testerAuth, { code, state }).expect(200);
+    expect(res.body).toEqual({ status: 'connected', username: 'tess' });
 
     const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.tester.id } });
     expect(conn).toMatchObject({ username: 'tess', gitlabUserId: gitlabUser.id, avatarUrl: 'https://git.test/tess.png', state: 'ACTIVE' });
@@ -76,26 +80,66 @@ describe('GitLab connection (e2e)', () => {
     expect(conn.expiresAt.getTime()).toBeGreaterThan(Date.now() + 7_000_000);
 
     // The state is single-use.
-    const again = await ctx.http().get('/api/gitlab/oauth/callback').query({ code, state }).expect(302);
-    expect(again.headers.location).toBe('http://localhost:3001/profile?gitlab=error&reason=invalid_state');
+    const again = await complete(actors.testerAuth, { code, state }).expect(400);
+    expect(again.body.details).toEqual({ reason: 'invalid_state' });
   });
 
   it('rejects unknown and expired states without calling GitLab', async () => {
-    const unknown = await ctx.http().get('/api/gitlab/oauth/callback').query({ code: 'x', state: 'forged' }).expect(302);
-    expect(unknown.headers.location).toBe('http://localhost:3001/profile?gitlab=error&reason=invalid_state');
+    const unknown = await complete(actors.testerAuth, { code: 'x', state: 'forged' }).expect(400);
+    expect(unknown.body.details).toEqual({ reason: 'invalid_state' });
 
     const url = await startOAuth();
     await ctx.prisma.gitlabOAuthState.updateMany({ data: { expiresAt: new Date(Date.now() - 1000) } });
-    const expired = await ctx.http().get('/api/gitlab/oauth/callback').query({ code: 'x', state: url.searchParams.get('state')! }).expect(302);
-    expect(expired.headers.location).toBe('http://localhost:3001/profile?gitlab=error&reason=invalid_state');
+    const expired = await complete(actors.testerAuth, { code: 'x', state: url.searchParams.get('state')! }).expect(400);
+    expect(expired.body.details).toEqual({ reason: 'invalid_state' });
     expect(fake.requestsTo('/oauth/token')).toHaveLength(0);
   });
 
   it('reports a denied authorization', async () => {
     const url = await startOAuth();
-    const res = await ctx.http().get('/api/gitlab/oauth/callback').query({ error: 'access_denied', state: url.searchParams.get('state')! }).expect(302);
-    expect(res.headers.location).toBe('http://localhost:3001/profile?gitlab=error&reason=denied');
+    const res = await complete(actors.testerAuth, { error: 'access_denied', state: url.searchParams.get('state')! }).expect(400);
+    expect(res.body.details).toEqual({ reason: 'denied' });
     expect(await ctx.prisma.gitlabConnection.count()).toBe(0);
+  });
+
+  it("does not let a different tool user complete someone else's OAuth state", async () => {
+    const url = await startOAuth(actors.testerAuth);
+    const state = url.searchParams.get('state')!;
+    const gitlabUser = fake.addUser({ username: 'tess' });
+    const code = fake.issueAuthCode(gitlabUser, url.searchParams.get('code_challenge')!, REDIRECT_URI);
+
+    // Admin tries to complete tester's state (e.g. tester sent them the authorizeUrl).
+    const stolen = await complete(actors.adminAuth, { code, state }).expect(400);
+    expect(stolen.body.details).toEqual({ reason: 'invalid_state' });
+    expect(fake.requestsTo('/oauth/token')).toHaveLength(0);
+    expect(await ctx.prisma.gitlabConnection.count()).toBe(0);
+
+    // The state was never consumed: its rightful owner can still complete it.
+    const res = await complete(actors.testerAuth, { code, state }).expect(200);
+    expect(res.body).toEqual({ status: 'connected', username: 'tess' });
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.tester.id } });
+    expect(conn.gitlabUserId).toBe(gitlabUser.id);
+  });
+
+  it('refuses to link a GitLab account already connected to a different tool user', async () => {
+    const { gitlabUser, accessToken: adminAccessToken } = await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'shared' });
+
+    const url = await startOAuth(actors.testerAuth);
+    const code = fake.issueAuthCode(gitlabUser, url.searchParams.get('code_challenge')!, REDIRECT_URI);
+    const state = url.searchParams.get('state')!;
+
+    const res = await complete(actors.testerAuth, { code, state }).expect(400);
+    expect(res.body.details).toEqual({ reason: 'already_linked' });
+
+    expect(await ctx.prisma.gitlabConnection.count({ where: { userId: actors.tester.id } })).toBe(0);
+    const adminConn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.admin.id } });
+    expect(ctx.app.get(TokenCipher).decrypt(adminConn.accessTokenEnc)).toBe(adminAccessToken);
+    const newlyIssued = fake.issued.at(-1)!;
+    expect(fake.revoked).toContain(newlyIssued.accessToken);
+  });
+
+  it('requires authentication to complete OAuth', async () => {
+    await ctx.http().post('/api/gitlab/oauth/complete').send({ state: 'whatever' }).expect(401);
   });
 
   it('disconnects, revoking the token at GitLab', async () => {
@@ -116,7 +160,9 @@ describe('GitLab connection (e2e)', () => {
     expect(res.body).toEqual([
       { id: 101, name: 'ninja-store', pathWithNamespace: 'mobile/ninja-store', webUrl: `${fake.url}/mobile/ninja-store`, defaultBranch: 'main' },
     ]);
-    await ctx.http().get('/api/gitlab/projects').set(actors.testerAuth).expect(403);
+    // Proves role gating specifically (not just "tester happens to lack a connection").
+    const forbidden = await ctx.http().get('/api/gitlab/projects').set(actors.testerAuth).expect(403);
+    expect(forbidden.body.message).toBe('You do not have permission to perform this action');
   });
 
   it('asks users without a connection to connect GitLab', async () => {
