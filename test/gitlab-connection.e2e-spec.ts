@@ -188,6 +188,21 @@ describe('GitLab connection (e2e)', () => {
     expect(conn.expiresAt.getTime()).toBeGreaterThan(Date.now() + 3_600_000);
   });
 
+  it('refreshes exactly once when two requests race past expiry', async () => {
+    const { gitlabUser } = await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'admin', expired: true });
+    fake.addProject({ id: 101, path: 'mobile/ninja-store', members: [gitlabUser] });
+
+    const [a, b] = await Promise.all([
+      ctx.http().get('/api/gitlab/projects').set(actors.adminAuth),
+      ctx.http().get('/api/gitlab/projects').set(actors.adminAuth),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(fake.requestsTo('/oauth/token')).toHaveLength(1);
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.admin.id } });
+    expect(conn.state).toBe('ACTIVE');
+  });
+
   it('marks the connection NEEDS_RECONNECT when the refresh fails', async () => {
     await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'admin', expired: true });
     fake.refreshTokens.clear();

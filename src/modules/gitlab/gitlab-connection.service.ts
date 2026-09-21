@@ -1,4 +1,4 @@
-import { BadGatewayException, BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GitlabConnection, GitlabConnectionState, Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
@@ -37,6 +37,9 @@ const needsReconnect = () =>
   });
 const completionFailed = (reason: CompleteOAuthFailureReason) =>
   new BadRequestException({ message: 'Could not connect GitLab', details: { reason } });
+
+/** GitLab statuses that mean the refresh token itself was rejected (and only these mark NEEDS_RECONNECT). */
+const isRefreshRejected = (e: GitlabHttpError) => e.status === 400 || e.status === 401;
 
 @Injectable()
 export class GitlabConnectionService {
@@ -203,26 +206,53 @@ export class GitlabConnectionService {
     await this.prisma.gitlabConnection.updateMany({ where: { userId }, data: { state: GitlabConnectionState.NEEDS_RECONNECT } });
   }
 
+  /**
+   * Refreshes `connection`'s access token. GitLab refresh tokens are single-use, so this re-reads
+   * the row first: another request may already have rotated it (or the token may simply be fresh
+   * again) between the caller's read and this call — in which case GitLab is not called again.
+   * The eventual write is itself conditional on the refresh token this call saw, so even a second
+   * concurrent refresh that slipped past the in-process `refreshing` lock (e.g. because its own
+   * stale read reached here only after the first one fully finished) can't spend an
+   * already-rotated refresh token and wrongly mark the connection NEEDS_RECONNECT.
+   */
   private async refresh(connection: GitlabConnection): Promise<string> {
+    const seenRefreshTokenEnc = connection.refreshTokenEnc;
+    const fresh = await this.prisma.gitlabConnection.findUnique({ where: { id: connection.id } });
+    if (!fresh) throw notConnected();
+    if (fresh.refreshTokenEnc !== seenRefreshTokenEnc || fresh.expiresAt.getTime() - Date.now() > REFRESH_MARGIN_MS) {
+      return this.cipher.decrypt(fresh.accessTokenEnc);
+    }
+
+    let tokens: OAuthTokens;
     try {
-      const tokens = await this.api.refreshTokens(this.cipher.decrypt(connection.refreshTokenEnc));
-      await this.prisma.gitlabConnection.update({
-        where: { id: connection.id },
-        data: {
-          accessTokenEnc: this.cipher.encrypt(tokens.accessToken),
-          refreshTokenEnc: this.cipher.encrypt(tokens.refreshToken),
-          expiresAt: tokens.expiresAt,
-          state: GitlabConnectionState.ACTIVE,
-        },
-      });
-      return tokens.accessToken;
+      tokens = await this.api.refreshTokens(this.cipher.decrypt(fresh.refreshTokenEnc));
     } catch (e) {
-      if (e instanceof GitlabHttpError && e.status > 0 && e.status < 500) {
-        await this.markNeedsReconnect(connection.userId);
+      if (e instanceof GitlabHttpError && isRefreshRejected(e)) {
+        await this.markNeedsReconnect(fresh.userId);
         throw needsReconnect();
       }
-      if (e instanceof GitlabHttpError) throw new BadGatewayException({ message: `GitLab request failed: ${e.message}`, details: { source: 'gitlab' } });
+      if (e instanceof GitlabHttpError) throw toHttpException(e);
       throw e;
     }
+
+    const updated = await this.prisma.gitlabConnection.updateMany({
+      where: { id: fresh.id, refreshTokenEnc: fresh.refreshTokenEnc },
+      data: {
+        accessTokenEnc: this.cipher.encrypt(tokens.accessToken),
+        refreshTokenEnc: this.cipher.encrypt(tokens.refreshToken),
+        expiresAt: tokens.expiresAt,
+        state: GitlabConnectionState.ACTIVE,
+      },
+    });
+    if (updated.count === 0) {
+      // Someone else refreshed, or disconnected, between our re-read and this write.
+      const after = await this.prisma.gitlabConnection.findUnique({ where: { id: fresh.id } });
+      if (!after) {
+        await this.api.revokeToken(tokens.accessToken).catch(() => {});
+        throw notConnected();
+      }
+      return this.cipher.decrypt(after.accessTokenEnc);
+    }
+    return tokens.accessToken;
   }
 }
