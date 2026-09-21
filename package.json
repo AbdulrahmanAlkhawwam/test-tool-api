@@ -10,7 +10,7 @@
     "start:prod": "node dist/main.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "jest",
-    "test:e2e": "dotenv run -f .env.test -- prisma migrate deploy && dotenv run -f .env.test -- jest --config ./test/jest-e2e.json --runInBand",
+    "test:e2e": "node ./node_modules/dotenv-cli/cli.js -e .env.test -- prisma migrate deploy && node ./node_modules/dotenv-cli/cli.js -e .env.test -- jest --config ./test/jest-e2e.json --runInBand",
     "db:up": "docker compose up -d",
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
