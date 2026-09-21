@@ -1,4 +1,4 @@
-import { seedActors } from './utils/factories';
+import { seedActors, seedProject } from './utils/factories';
 import { createTestApp, resetDb, TestContext } from './utils/test-app';
 
 describe('GitLab disabled (e2e)', () => {
@@ -33,5 +33,11 @@ describe('GitLab disabled (e2e)', () => {
     await expectHidden('post', '/api/gitlab/oauth/complete', { state: 'x' });
     await expectHidden('delete', '/api/gitlab/connection');
     await expectHidden('get', '/api/gitlab/projects?search=ninja');
+  });
+
+  it('hides the repository link endpoints', async () => {
+    const project = await seedProject(ctx.prisma, actors.admin.id);
+    await expectHidden('put', `/api/projects/${project.id}/repository`, { gitlabProjectId: 101, testsPath: 'e2e' });
+    await expectHidden('delete', `/api/projects/${project.id}/repository`);
   });
 });

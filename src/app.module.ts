@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import configuration from './config/configuration';
 import { HealthController } from './health.controller';
 import { AuthModule } from './modules/auth/auth.module';
+import { AutomationModule } from './modules/automation/automation.module';
 import { GitlabModule } from './modules/gitlab/gitlab.module';
 import { ImportExportModule } from './modules/import-export/import-export.module';
 import { ProjectModulesModule } from './modules/project-modules/project-modules.module';
@@ -26,6 +27,7 @@ import { PrismaModule } from './prisma/prisma.module';
     ImportExportModule,
     ReportsModule,
     GitlabModule,
+    AutomationModule,
   ],
   controllers: [HealthController],
 })
