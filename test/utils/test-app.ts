@@ -33,7 +33,7 @@ export async function resetDb(prisma: PrismaService): Promise<void> {
     throw new Error(`resetDb refuses to truncate database "${dbName}": its name must end with "_test"`);
   }
   await prisma.$executeRawUnsafe(
-    'TRUNCATE "TestResult", "TestRun", "TestCase", "ProjectModule", "Project", "User" RESTART IDENTITY CASCADE',
+    'TRUNCATE "GitlabOAuthState", "GitlabConnection", "TestResult", "TestRun", "TestCase", "ProjectModule", "Project", "User" RESTART IDENTITY CASCADE',
   );
 }
 
