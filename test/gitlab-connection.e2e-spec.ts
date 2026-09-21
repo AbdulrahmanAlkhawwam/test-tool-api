@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { TokenCipher } from '../src/common/crypto/token-cipher';
 import { FakeGitlab } from './utils/fake-gitlab';
 import { seedActors } from './utils/factories';
-import { createGitlabTestApp, seedGitlabConnection } from './utils/gitlab';
+import { createGitlabTestApp, seedGitlabConnection, waitForRequests } from './utils/gitlab';
 import { resetDb, TestContext } from './utils/test-app';
 
 // GitLab redirects the browser to the WEB app, which then calls POST /api/gitlab/oauth/complete.
@@ -95,6 +95,44 @@ describe('GitLab connection (e2e)', () => {
     expect(fake.requestsTo('/oauth/token')).toHaveLength(0);
   });
 
+  it('invalidates an older unused state as soon as a new OAuth flow is started', async () => {
+    const oldUrl = await startOAuth();
+    const oldState = oldUrl.searchParams.get('state')!;
+    await startOAuth(); // starts a second flow for the same user
+
+    const gitlabUser = fake.addUser({ username: 'tess' });
+    const code = fake.issueAuthCode(gitlabUser, oldUrl.searchParams.get('code_challenge')!, REDIRECT_URI);
+    const res = await complete(actors.testerAuth, { code, state: oldState }).expect(400);
+    expect(res.body.details).toEqual({ reason: 'invalid_state' });
+    expect(fake.requestsTo('/oauth/token')).toHaveLength(0);
+  });
+
+  it('reports exchange_failed and stores nothing when GitLab rejects the code exchange', async () => {
+    const url = await startOAuth();
+    const gitlabUser = fake.addUser({ username: 'tess' });
+    const code = fake.issueAuthCode(gitlabUser, url.searchParams.get('code_challenge')!, REDIRECT_URI);
+    const state = url.searchParams.get('state')!;
+    fake.forceNextTokenResponse(500, { error: 'server_error' });
+
+    const res = await complete(actors.testerAuth, { code, state }).expect(400);
+    expect(res.body.details).toEqual({ reason: 'exchange_failed' });
+    expect(await ctx.prisma.gitlabConnection.count()).toBe(0);
+  });
+
+  it('revokes the freshly issued token when getCurrentUser fails after a successful exchange', async () => {
+    const url = await startOAuth();
+    const gitlabUser = fake.addUser({ username: 'tess' });
+    const code = fake.issueAuthCode(gitlabUser, url.searchParams.get('code_challenge')!, REDIRECT_URI);
+    const state = url.searchParams.get('state')!;
+    fake.breakNextUserFetch();
+
+    const res = await complete(actors.testerAuth, { code, state }).expect(400);
+    expect(res.body.details).toEqual({ reason: 'exchange_failed' });
+    expect(await ctx.prisma.gitlabConnection.count()).toBe(0);
+    const issued = fake.issued.at(-1)!;
+    expect(fake.revoked).toContain(issued.accessToken);
+  });
+
   it('reports a denied authorization', async () => {
     const url = await startOAuth();
     const res = await complete(actors.testerAuth, { error: 'access_denied', state: url.searchParams.get('state')! }).expect(400);
@@ -138,6 +176,22 @@ describe('GitLab connection (e2e)', () => {
     expect(fake.revoked).toContain(newlyIssued.accessToken);
   });
 
+  it("revokes the old identity's token when a user re-links to a different GitLab identity", async () => {
+    const { accessToken: oldAccessToken } = await seedGitlabConnection(ctx, fake, actors.tester.id, { username: 'old-identity' });
+
+    const url = await startOAuth();
+    const newGitlabUser = fake.addUser({ username: 'new-identity' });
+    const code = fake.issueAuthCode(newGitlabUser, url.searchParams.get('code_challenge')!, REDIRECT_URI);
+    const state = url.searchParams.get('state')!;
+
+    const res = await complete(actors.testerAuth, { code, state }).expect(200);
+    expect(res.body).toEqual({ status: 'connected', username: 'new-identity' });
+
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.tester.id } });
+    expect(conn.gitlabUserId).toBe(newGitlabUser.id);
+    expect(fake.revoked).toContain(oldAccessToken);
+  });
+
   it('requires authentication to complete OAuth', async () => {
     await ctx.http().post('/api/gitlab/oauth/complete').send({ state: 'whatever' }).expect(401);
   });
@@ -149,6 +203,33 @@ describe('GitLab connection (e2e)', () => {
     expect(await ctx.prisma.gitlabConnection.count()).toBe(0);
     const status = await ctx.http().get('/api/gitlab/status').set(actors.testerAuth).expect(200);
     expect(status.body.connection).toBeNull();
+  });
+
+  it('revokes the freshly refreshed token when disconnect races an in-flight refresh', async () => {
+    const { gitlabUser, accessToken: oldAccessToken } = await seedGitlabConnection(ctx, fake, actors.admin.id, {
+      username: 'admin',
+      expired: true,
+    });
+    fake.addProject({ id: 101, path: 'mobile/ninja-store', members: [gitlabUser] });
+
+    // Delay GitLab's answer to the refresh call, disconnect while it's in flight, then let it land.
+    // `.then()` (not a bare assignment) is what actually dispatches a supertest request, so the
+    // in-flight call and the disconnect below can race as intended.
+    const release = fake.holdTokenResponses();
+    const refreshingRequest = ctx.http().get('/api/gitlab/projects').set(actors.adminAuth).then((r) => r);
+    await waitForRequests(fake, '/oauth/token');
+    await ctx.http().delete('/api/gitlab/connection').set(actors.adminAuth).expect(204);
+    release();
+
+    const res = await refreshingRequest;
+    expect(res.status).toBe(403);
+    expect(res.body.details).toEqual({ code: 'GITLAB_NOT_CONNECTED' });
+
+    // The token disconnect revoked (the old, pre-refresh one) and the token the in-flight refresh
+    // went on to fetch (now unrevoked-nowhere-to-live) must both end up revoked at GitLab.
+    const newlyIssued = fake.issued.at(-1)!;
+    expect(fake.revoked).toEqual(expect.arrayContaining([oldAccessToken, newlyIssued.accessToken]));
+    expect(await ctx.prisma.gitlabConnection.count()).toBe(0);
   });
 
   it('searches GitLab projects for admins only', async () => {
@@ -221,5 +302,51 @@ describe('GitLab connection (e2e)', () => {
     expect(res.body.message).toBe('Your GitLab connection expired – reconnect GitLab to continue');
     const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.admin.id } });
     expect(conn.state).toBe('NEEDS_RECONNECT');
+  });
+
+  it('uses another refresher\'s winning token instead of failing when this refresh\'s rejection is stale', async () => {
+    const { gitlabUser } = await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'admin', expired: true });
+    fake.addProject({ id: 101, path: 'mobile/ninja-store', members: [gitlabUser] });
+
+    // GitLab will answer this refresh with invalid_grant, but only after another refresher (that
+    // we simulate directly against the DB) has already rotated the tokens.
+    fake.forceNextTokenResponse(400, { error: 'invalid_grant', error_description: 'The provided authorization grant is invalid' });
+    const release = fake.holdTokenResponses();
+
+    // `.then()` (not a bare assignment) is what actually dispatches a supertest request.
+    const req = ctx.http().get('/api/gitlab/projects').set(actors.adminAuth).then((r) => r);
+    await waitForRequests(fake, '/oauth/token');
+
+    const winnerTokens = fake.issueTokens(gitlabUser);
+    const cipher = ctx.app.get(TokenCipher);
+    await ctx.prisma.gitlabConnection.update({
+      where: { userId: actors.admin.id },
+      data: {
+        accessTokenEnc: cipher.encrypt(winnerTokens.accessToken),
+        refreshTokenEnc: cipher.encrypt(winnerTokens.refreshToken),
+        expiresAt: new Date(Date.now() + 7_200_000),
+      },
+    });
+
+    release();
+    const res = await req;
+    expect(res.status).toBe(200);
+    expect(fake.requestsTo('/api/v4/projects').at(-1)!.token).toBe(winnerTokens.accessToken);
+
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.admin.id } });
+    expect(conn.state).toBe('ACTIVE');
+    expect(ctx.app.get(TokenCipher).decrypt(conn.accessTokenEnc)).toBe(winnerTokens.accessToken);
+  });
+
+  it('leaves the connection ACTIVE and answers 502 on a GitLab 5xx during refresh (not NEEDS_RECONNECT)', async () => {
+    const { gitlabUser } = await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'admin', expired: true });
+    fake.addProject({ id: 101, path: 'mobile/ninja-store', members: [gitlabUser] });
+    fake.forceNextTokenResponse(500, { error: 'server_error' });
+
+    const res = await ctx.http().get('/api/gitlab/projects').set(actors.adminAuth).expect(502);
+    expect(res.body.details).toEqual({ source: 'gitlab' });
+
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.admin.id } });
+    expect(conn.state).toBe('ACTIVE');
   });
 });

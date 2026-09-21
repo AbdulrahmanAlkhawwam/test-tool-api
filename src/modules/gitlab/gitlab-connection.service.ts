@@ -41,11 +41,25 @@ const completionFailed = (reason: CompleteOAuthFailureReason) =>
 /** GitLab statuses that mean the refresh token itself was rejected (and only these mark NEEDS_RECONNECT). */
 const isRefreshRejected = (e: GitlabHttpError) => e.status === 400 || e.status === 401;
 
+/** Whether a P2002 unique-constraint violation was on `gitlabUserId` (Prisma's `target` can be a string or a string[]). */
+const violatesGitlabUserId = (e: Prisma.PrismaClientKnownRequestError): boolean => {
+  const target = e.meta?.target;
+  if (Array.isArray(target)) return target.includes('gitlabUserId');
+  if (typeof target === 'string') return target.includes('gitlabUserId');
+  return false;
+};
+
 @Injectable()
 export class GitlabConnectionService {
   private readonly logger = new Logger(GitlabConnectionService.name);
 
-  /** One refresh in flight per user: GitLab refresh tokens are single-use (single API instance). */
+  /**
+   * One refresh in flight per user: GitLab refresh tokens are single-use (single API instance).
+   * Across multiple instances, with no shared lock, `refresh()`'s re-read-then-conditional-write
+   * is what actually keeps refreshes safe — a losing instance (here or on another instance)
+   * detects the winner's write and reuses its token rather than wasting, or wrongly failing on,
+   * an already-rotated refresh token. This map is purely a same-process optimization on top of that.
+   */
   private readonly refreshing = new Map<string, Promise<string>>();
 
   constructor(
@@ -116,22 +130,29 @@ export class GitlabConnectionService {
     if (claimed.count !== 1) throw completionFailed('invalid_state');
     if (params.error || !params.code) throw completionFailed('denied');
 
-    let tokens: OAuthTokens;
+    let tokens: OAuthTokens | undefined;
     let gitlabUser: GitlabUser;
     try {
       tokens = await this.api.exchangeCode(params.code, this.cipher.decrypt(row.codeVerifierEnc));
       gitlabUser = await this.api.getCurrentUser(tokens.accessToken);
     } catch (e) {
+      // The code exchange itself may have succeeded even though a later step (fetching the user)
+      // failed; don't leave that freshly issued, now-unused token valid at GitLab.
+      if (tokens) await this.api.revokeToken(tokens.accessToken).catch(() => {});
       if (!(e instanceof GitlabHttpError)) this.logger.error(`GitLab OAuth exchange failed: ${(e as Error).message}`);
       throw completionFailed('exchange_failed');
     }
 
     // One GitLab identity can only ever be linked to one tool user.
-    const existing = await this.prisma.gitlabConnection.findUnique({ where: { gitlabUserId: gitlabUser.id } });
-    if (existing && existing.userId !== userId) {
+    const linkedToOther = await this.prisma.gitlabConnection.findUnique({ where: { gitlabUserId: gitlabUser.id } });
+    if (linkedToOther && linkedToOther.userId !== userId) {
       await this.api.revokeToken(tokens.accessToken).catch(() => {});
       throw completionFailed('already_linked');
     }
+
+    // This user's own current connection, if any — used below to detect a re-link to a different
+    // GitLab identity, so the old identity's now-orphaned token can be revoked too.
+    const previousConnection = await this.prisma.gitlabConnection.findUnique({ where: { userId } });
 
     const data = {
       gitlabUserId: gitlabUser.id,
@@ -147,24 +168,40 @@ export class GitlabConnectionService {
     } catch (e) {
       // The unique index on gitlabUserId is the real guard: a concurrent completion could have
       // linked this GitLab identity to someone else between the check above and this write.
-      const isUniqueViolation = e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
       await this.api.revokeToken(tokens.accessToken).catch(() => {});
-      if (isUniqueViolation) throw completionFailed('already_linked');
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        if (violatesGitlabUserId(e)) throw completionFailed('already_linked');
+        throw e; // some other constraint violation — not ours to reinterpret as an OAuth failure.
+      }
       this.logger.error(`GitLab OAuth completion failed: ${(e as Error).message}`);
       throw completionFailed('exchange_failed');
+    }
+
+    // Re-linked from a different GitLab identity: best-effort revoke the old identity's token.
+    if (previousConnection && previousConnection.gitlabUserId !== gitlabUser.id) {
+      await this.api.revokeToken(this.cipher.decrypt(previousConnection.accessTokenEnc)).catch(() => {});
     }
     return { status: 'connected', username: gitlabUser.username };
   }
 
+  /**
+   * Deletes the connection first, then best-effort revokes its token — not the other way round.
+   * Revoking before deleting would leave a window where a concurrent refresh could rotate the
+   * token (making the just-revoked one stale) and leave the *new* token unrevoked once this
+   * delete finally lands. Deleting first means that concurrent refresh's conditional write finds
+   * the row already gone, so `refresh()` itself revokes whatever token it just fetched.
+   */
   async disconnect(userId: string): Promise<void> {
-    const connection = await this.prisma.gitlabConnection.findUnique({ where: { userId } });
-    if (!connection) return;
+    let connection: GitlabConnection;
     try {
-      await this.api.revokeToken(this.cipher.decrypt(connection.accessTokenEnc));
-    } catch {
-      // Best effort: the token is deleted locally either way.
+      connection = await this.prisma.gitlabConnection.delete({ where: { userId } });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') return; // no connection to disconnect
+      throw e;
     }
-    await this.prisma.gitlabConnection.deleteMany({ where: { userId } });
+    await this.api.revokeToken(this.cipher.decrypt(connection.accessTokenEnc)).catch(() => {
+      // Best effort: the row is already gone locally either way.
+    });
   }
 
   async requireConnection(userId: string): Promise<GitlabConnection> {
@@ -228,7 +265,25 @@ export class GitlabConnectionService {
       tokens = await this.api.refreshTokens(this.cipher.decrypt(fresh.refreshTokenEnc));
     } catch (e) {
       if (e instanceof GitlabHttpError && isRefreshRejected(e)) {
-        await this.markNeedsReconnect(fresh.userId);
+        // GitLab rejected the refresh token we sent. That token is single-use, so if another
+        // refresher (this process or another instance) already rotated it while our call was in
+        // flight, this rejection is just stale — use the winner's token instead of failing.
+        const afterRejection = await this.prisma.gitlabConnection.findUnique({ where: { id: fresh.id } });
+        if (afterRejection && afterRejection.refreshTokenEnc !== fresh.refreshTokenEnc) {
+          return this.cipher.decrypt(afterRejection.accessTokenEnc);
+        }
+        // Nobody else won: the refresh token itself is genuinely bad. Only mark NEEDS_RECONNECT
+        // if it's still the same token we just tried — conditional on `refreshTokenEnc` so a
+        // last-instant winner isn't clobbered.
+        const marked = await this.prisma.gitlabConnection.updateMany({
+          where: { id: fresh.id, refreshTokenEnc: fresh.refreshTokenEnc },
+          data: { state: GitlabConnectionState.NEEDS_RECONNECT },
+        });
+        if (marked.count === 0) {
+          const latest = await this.prisma.gitlabConnection.findUnique({ where: { id: fresh.id } });
+          if (latest) return this.cipher.decrypt(latest.accessTokenEnc);
+          throw notConnected();
+        }
         throw needsReconnect();
       }
       if (e instanceof GitlabHttpError) throw toHttpException(e);

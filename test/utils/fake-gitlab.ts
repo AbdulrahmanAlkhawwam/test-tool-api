@@ -101,6 +101,9 @@ export class FakeGitlab {
   requests: FakeRequest[] = [];
   private seq = 1;
   private server?: Server;
+  private tokenGate: (() => Promise<void>) | null = null;
+  private forcedTokenResponse: { status: number; body: unknown } | null = null;
+  private breakUserFetch = false;
 
   static async start(): Promise<FakeGitlab> {
     const fake = new FakeGitlab();
@@ -134,6 +137,36 @@ export class FakeGitlab {
     this.pipelines = [];
     this.requests = [];
     this.seq = 1;
+    this.tokenGate = null;
+    this.forcedTokenResponse = null;
+    this.breakUserFetch = false;
+  }
+
+  /**
+   * Delays every subsequent `/oauth/token` response until the returned function is called — lets
+   * a test pause a request mid-flight (e.g. to race a disconnect or another refresher against it)
+   * and then let it proceed.
+   */
+  holdTokenResponses(): () => void {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.tokenGate = () => gate;
+    return () => {
+      release();
+      this.tokenGate = null;
+    };
+  }
+
+  /** Makes the very next `/oauth/token` request answer with this status/body instead of normal processing. */
+  forceNextTokenResponse(status: number, body: unknown): void {
+    this.forcedTokenResponse = { status, body };
+  }
+
+  /** Makes the very next `GET /api/v4/user` request fail with a 500, to simulate a post-exchange failure. */
+  breakNextUserFetch(): void {
+    this.breakUserFetch = true;
   }
 
   addUser(data: { username: string; name?: string; avatar_url?: string | null }): FakeUser {
@@ -261,7 +294,14 @@ export class FakeGitlab {
       next();
     });
 
-    app.post('/oauth/token', (req, res) => {
+    app.post('/oauth/token', async (req, res) => {
+      if (this.tokenGate) await this.tokenGate();
+      if (this.forcedTokenResponse) {
+        const { status, body } = this.forcedTokenResponse;
+        this.forcedTokenResponse = null;
+        res.status(status).json(body);
+        return;
+      }
       const b = req.body as Record<string, string | undefined>;
       if (b.client_id !== this.clientId || b.client_secret !== this.clientSecret) {
         res.status(401).json({ error: 'invalid_client' });
@@ -340,6 +380,11 @@ export class FakeGitlab {
     };
 
     api.get('/user', (_req, res) => {
+      if (this.breakUserFetch) {
+        this.breakUserFetch = false;
+        res.status(500).json({ message: 'simulated failure' });
+        return;
+      }
       res.json(userOf(res));
     });
 

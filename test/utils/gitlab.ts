@@ -67,6 +67,20 @@ export async function seedGitlabConnection(
   return { gitlabUser, ...tokens };
 }
 
+/**
+ * Polls until at least `count` requests matching `pathPart` have reached the fake (its request
+ * log is written by middleware that runs before any per-route gate, so this detects a request
+ * that is currently held mid-flight by `fake.holdTokenResponses()`). Used to line up a concurrent
+ * disconnect/refresh race with a request we know is paused waiting on GitLab.
+ */
+export async function waitForRequests(fake: FakeGitlab, pathPart: string, count = 1, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (fake.requestsTo(pathPart).length < count) {
+    if (Date.now() - start > timeoutMs) throw new Error(`Timed out waiting for ${count} request(s) to ${pathPart}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 /** A tool project linked to GitLab project 101 (mobile/ninja-store, default branch main, tests in e2e/). */
 export async function seedLinkedProject(
   ctx: TestContext,
