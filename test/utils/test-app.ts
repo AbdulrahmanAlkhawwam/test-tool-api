@@ -13,16 +13,34 @@ export interface TestContext {
   http: () => ReturnType<typeof request>;
 }
 
-export async function createTestApp(): Promise<TestContext> {
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-  const app = moduleRef.createNestApplication();
-  configureApp(app);
-  await app.init();
-  return {
-    app,
-    prisma: app.get(PrismaService),
-    http: () => request(app.getHttpServer()),
-  };
+/**
+ * Builds the app. `env` overrides process.env while the Nest module is compiled: the config
+ * factory (ConfigModule `load`) reads process.env at that moment. `undefined` removes a variable.
+ * Previous values are restored afterwards, so other test files are unaffected.
+ */
+export async function createTestApp(env: Record<string, string | undefined> = {}): Promise<TestContext> {
+  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  applyEnv(env);
+  try {
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    const app = moduleRef.createNestApplication();
+    configureApp(app);
+    await app.init();
+    return {
+      app,
+      prisma: app.get(PrismaService),
+      http: () => request(app.getHttpServer()),
+    };
+  } finally {
+    applyEnv(previous);
+  }
+}
+
+function applyEnv(env: Record<string, string | undefined>): void {
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 }
 
 export async function resetDb(prisma: PrismaService): Promise<void> {
