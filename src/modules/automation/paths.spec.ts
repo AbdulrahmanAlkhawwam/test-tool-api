@@ -11,6 +11,23 @@ describe('repository path rules', () => {
     expect(() => normalizeRepoPath('  / ')).toThrow('Path is required');
   });
 
+  it('rejects a dot/dot-dot segment hidden behind leading or trailing whitespace', () => {
+    expect(() => normalizeRepoPath('e2e/ ../x.ts')).toThrow('Path must not contain "." or ".." segments');
+    expect(() => normalizeRepoPath('e2e/.. /x.ts')).toThrow('Path must not contain "." or ".." segments');
+    expect(() => normalizeRepoPath('e2e/ . /x.ts')).toThrow('Path must not contain "." or ".." segments');
+  });
+
+  it('rejects segments with leading or trailing whitespace that are not dot segments', () => {
+    expect(() => normalizeRepoPath('e2e/ auth/login.spec.ts')).toThrow('Path contains invalid characters');
+    expect(() => normalizeRepoPath('e2e/auth /login.spec.ts')).toThrow('Path contains invalid characters');
+  });
+
+  it('rejects Unicode bidi/format control characters', () => {
+    expect(() => normalizeRepoPath('e2e/‮user.spec.ts')).toThrow('Path contains invalid characters');
+    expect(() => normalizeRepoPath('e2e/‎‏auth/login.spec.ts')).toThrow('Path contains invalid characters');
+    expect(() => normalizeRepoPath('e2e/⁦auth⁩/login.spec.ts')).toThrow('Path contains invalid characters');
+  });
+
   it('accepts the tests folder itself and anything below it', () => {
     expect(resolveInTestsPath('e2e', 'e2e')).toBe('e2e');
     expect(resolveInTestsPath('e2e', '/e2e/auth/login.spec.ts')).toBe('e2e/auth/login.spec.ts');

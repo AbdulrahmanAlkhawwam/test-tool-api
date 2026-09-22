@@ -6,13 +6,27 @@ export const BRANCH_NAME_RE = /^(?!\/)(?!.*\/\/)(?!.*\.\.)[A-Za-z0-9._\-/]{1,200
 /** Every branch the tool commits to starts with this prefix, so it can never be the default branch. */
 export const WORK_BRANCH_PREFIX = 'tests/';
 
+/**
+ * Control characters, plus the Unicode bidi/format controls sometimes used to disguise a path in
+ * a UI (left-to-right/right-to-left marks and overrides, isolates): none belongs in a repo path.
+ */
+const INVALID_CHARS_RE = /[\x00-\x1f‎‏‪-‮⁦-⁩]/;
+
 /** Repository-relative path with "/" separators, no surrounding or doubled slashes, no "." / ".." segments. */
 export function normalizeRepoPath(raw: string): string {
   const path = raw.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/^\/+|\/+$/g, '');
   if (!path) throw new BadRequestException('Path is required');
-  if (/[\x00-\x1f]/.test(path)) throw new BadRequestException('Path contains invalid characters');
-  if (path.split('/').some((segment) => segment === '.' || segment === '..')) {
-    throw new BadRequestException('Path must not contain "." or ".." segments');
+  if (INVALID_CHARS_RE.test(path)) throw new BadRequestException('Path contains invalid characters');
+  for (const segment of path.split('/')) {
+    const trimmed = segment.trim();
+    // A segment that is only "." or ".." once trimmed (e.g. " .." hiding inside "e2e/ ../x.ts")
+    // is just as much a traversal as an untrimmed one.
+    if (trimmed === '.' || trimmed === '..') {
+      throw new BadRequestException('Path must not contain "." or ".." segments');
+    }
+    // Leading/trailing whitespace elsewhere in a segment is never a legitimate file/dir name and
+    // can be used to smuggle confusable-looking paths past a naive comparison.
+    if (segment !== trimmed) throw new BadRequestException('Path contains invalid characters');
   }
   return path;
 }
