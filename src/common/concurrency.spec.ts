@@ -39,4 +39,24 @@ describe('mapWithConcurrency', () => {
       }),
     ).rejects.toThrow('boom');
   });
+
+  it('stops claiming new items once a call has failed', async () => {
+    const started: number[] = [];
+    await expect(
+      mapWithConcurrency([1, 2, 3, 4, 5, 6], 2, async (item) => {
+        started.push(item);
+        if (item === 2) throw new Error('boom');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return item;
+      }),
+    ).rejects.toThrow('boom');
+    // Only the two items already claimed by the two workers when the failure happened started;
+    // nothing past that point was claimed.
+    expect(started).toEqual([1, 2]);
+  });
+
+  it('rejects a limit below 1', async () => {
+    await expect(mapWithConcurrency([1, 2], 0, async (item) => item)).rejects.toThrow('mapWithConcurrency: limit must be at least 1');
+    await expect(mapWithConcurrency([1, 2], -1, async (item) => item)).rejects.toThrow('mapWithConcurrency: limit must be at least 1');
+  });
 });

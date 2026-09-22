@@ -36,6 +36,20 @@ export interface GitlabConfig {
 
 const stripSlash = (value: string) => value.trim().replace(/\/+$/, '');
 
+/**
+ * Parses a non-negative integer from an env var, falling back to `fallback` when the value is
+ * missing, not a number, or negative. `zeroMeans`, when given, is what `0` itself means (e.g. the
+ * poll interval's "off" switch) so a caller can tell that apart from an unparsable value; without
+ * it, `0` also falls back to `fallback` (there is no meaningful "off" for a timeout).
+ */
+function parseNonNegativeInt(raw: string | undefined, fallback: number, allowZero = false): number {
+  if (raw === undefined) return fallback;
+  const value = parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  if (value === 0 && !allowZero) return fallback;
+  return value;
+}
+
 export function parseGitlabConfig(env: NodeJS.ProcessEnv): GitlabConfig {
   const url = stripSlash(env.GITLAB_URL ?? '');
   const config: GitlabConfig = {
@@ -46,8 +60,9 @@ export function parseGitlabConfig(env: NodeJS.ProcessEnv): GitlabConfig {
     redirectUri: env.GITLAB_OAUTH_REDIRECT_URI ?? '',
     tokenEncryptionKey: env.TOKEN_ENCRYPTION_KEY ?? '',
     webUrl: stripSlash(env.WEB_URL ?? 'http://localhost:3001'),
-    pollIntervalMs: parseInt(env.GITLAB_POLL_INTERVAL_MS ?? '20000', 10),
-    runTimeoutMs: parseInt(env.GITLAB_RUN_TIMEOUT_MINUTES ?? '120', 10) * 60_000,
+    // 0 is a meaningful, valid value here: it turns the pipeline poller off (tests rely on this).
+    pollIntervalMs: parseNonNegativeInt(env.GITLAB_POLL_INTERVAL_MS, 20_000, true),
+    runTimeoutMs: parseNonNegativeInt(env.GITLAB_RUN_TIMEOUT_MINUTES, 120) * 60_000,
   };
   if (config.enabled) {
     const missing = (

@@ -55,6 +55,25 @@ describe('parseGitlabConfig', () => {
     });
   });
 
+  it('falls back to the defaults for an unparsable or non-positive poll interval / run timeout', () => {
+    const base = {
+      GITLAB_URL: 'https://git.ejad.net',
+      GITLAB_OAUTH_CLIENT_ID: 'id',
+      GITLAB_OAUTH_CLIENT_SECRET: 'secret',
+      GITLAB_OAUTH_REDIRECT_URI: 'https://api.test/cb',
+      TOKEN_ENCRYPTION_KEY: KEY,
+    };
+    // 0 is kept for the poll interval (it means "off"), but a negative or non-numeric value isn't.
+    expect(parseGitlabConfig({ ...base, GITLAB_POLL_INTERVAL_MS: '0' })).toMatchObject({ pollIntervalMs: 0 });
+    expect(parseGitlabConfig({ ...base, GITLAB_POLL_INTERVAL_MS: 'abc' })).toMatchObject({ pollIntervalMs: 20_000 });
+    expect(parseGitlabConfig({ ...base, GITLAB_POLL_INTERVAL_MS: '-5' })).toMatchObject({ pollIntervalMs: 20_000 });
+    // There is no "off" for the run timeout, so 0 falls back too.
+    expect(parseGitlabConfig({ ...base, GITLAB_RUN_TIMEOUT_MINUTES: '0' })).toMatchObject({ runTimeoutMs: 7_200_000 });
+    expect(parseGitlabConfig({ ...base, GITLAB_RUN_TIMEOUT_MINUTES: 'abc' })).toMatchObject({ runTimeoutMs: 7_200_000 });
+    expect(parseGitlabConfig({ ...base, GITLAB_RUN_TIMEOUT_MINUTES: '-30' })).toMatchObject({ runTimeoutMs: 7_200_000 });
+    expect(parseGitlabConfig({ ...base, GITLAB_RUN_TIMEOUT_MINUTES: '30' })).toMatchObject({ runTimeoutMs: 1_800_000 });
+  });
+
   it('fails fast on missing OAuth settings or a bad encryption key', () => {
     expect(() => parseGitlabConfig({ GITLAB_URL: 'https://git.ejad.net' })).toThrow(
       'GITLAB_URL is set, so these variables are required too: GITLAB_OAUTH_CLIENT_ID, GITLAB_OAUTH_CLIENT_SECRET, GITLAB_OAUTH_REDIRECT_URI, TOKEN_ENCRYPTION_KEY',

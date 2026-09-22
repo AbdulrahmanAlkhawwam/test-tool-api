@@ -8,6 +8,7 @@ describe('Automated runs (e2e)', () => {
   let fake: FakeGitlab;
   let actors: Awaited<ReturnType<typeof seedActors>>;
   let tess: FakeUser;
+  let tessToken: string;
   let projectId: string;
   let caseIds: string[];
 
@@ -18,7 +19,9 @@ describe('Automated runs (e2e)', () => {
     await resetDb(ctx.prisma);
     fake.reset();
     actors = await seedActors(ctx);
-    tess = (await seedGitlabConnection(ctx, fake, actors.tester.id, { username: 'tess' })).gitlabUser;
+    const connection = await seedGitlabConnection(ctx, fake, actors.tester.id, { username: 'tess' });
+    tess = connection.gitlabUser;
+    tessToken = connection.accessToken;
     projectId = (await seedLinkedProject(ctx, fake, actors.admin.id, [tess])).project.id;
     const moduleId = (await seedModule(ctx.prisma, projectId)).id;
     caseIds = [
@@ -50,7 +53,8 @@ describe('Automated runs (e2e)', () => {
       results: [],
     });
     expect(res.body.name).toMatch(/^Automated · main · \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$/);
-    expect(pipeline).toMatchObject({ project_id: P, ref: 'main', userId: tess.id, variables: { EJAD_RUN_ID: res.body.id } });
+    expect(pipeline).toMatchObject({ project_id: P, ref: 'main', userId: tess.id });
+    expect(pipeline.variables).toEqual({ EJAD_RUN_ID: res.body.id });
   });
 
   it('scopes a run to a folder or file inside the tests folder', async () => {
@@ -62,12 +66,17 @@ describe('Automated runs (e2e)', () => {
     expect(outside.body.message).toBe('Path must be inside the tests folder "e2e"');
     const missing = await trigger({ branch: 'main', scope: { mode: 'PATH' } }).expect(400);
     expect(missing.body.message).toBe('scope.path is required for mode PATH');
+    const unsafe = await trigger({ branch: 'main', scope: { mode: 'PATH', path: 'e2e/auth *.ts' } }).expect(400);
+    expect(unsafe.body.message).toBe("Test paths can't contain spaces or special characters");
     expect(await ctx.prisma.testRun.count()).toBe(1);
   });
 
   it('scopes a run to selected cases with a grep and pre-created results', async () => {
     const res = await trigger({ branch: 'main', scope: { mode: 'CASES', caseIds: [caseIds[1], caseIds[0]] } }).expect(201);
-    expect(fake.pipelines[0].variables).toEqual({ EJAD_RUN_ID: res.body.id, EJAD_TEST_GREP: '@TC-AUTH-001\\b|@TC-AUTH-002\\b' });
+    expect(fake.pipelines[0].variables).toEqual({
+      EJAD_RUN_ID: res.body.id,
+      EJAD_TEST_GREP: '@TC-AUTH-001(?![A-Za-z0-9])|@TC-AUTH-002(?![A-Za-z0-9])',
+    });
     expect(res.body.summary).toMatchObject({ total: 2, notExecuted: 2 });
     expect(res.body.results.map((r: { testCase: { code: string } }) => r.testCase.code)).toEqual(['TC-AUTH-001', 'TC-AUTH-002']);
 
@@ -76,6 +85,22 @@ describe('Automated runs (e2e)', () => {
     const foreign = await trigger({ branch: 'main', scope: { mode: 'CASES', caseIds: ['7a1d0c5e-0000-4000-8000-000000000000'] } }).expect(400);
     expect(foreign.body.message).toBe('Some selected test cases do not exist in this project');
     await trigger({ branch: 'bad branch', scope: { mode: 'ALL' } }).expect(400);
+  });
+
+  it('deduplicates repeated case ids in a CASES scope', async () => {
+    const res = await trigger({ branch: 'main', scope: { mode: 'CASES', caseIds: [caseIds[0], caseIds[0], caseIds[1]] } }).expect(201);
+    expect(res.body.results).toHaveLength(2);
+    expect(fake.pipelines[0].variables).toEqual({
+      EJAD_RUN_ID: res.body.id,
+      EJAD_TEST_GREP: '@TC-AUTH-001(?![A-Za-z0-9])|@TC-AUTH-002(?![A-Za-z0-9])',
+    });
+  });
+
+  it('rejects a CASES scope that includes a soft-deleted case', async () => {
+    await ctx.prisma.testCase.update({ where: { id: caseIds[0] }, data: { deletedAt: new Date() } });
+    const res = await trigger({ branch: 'main', scope: { mode: 'CASES', caseIds: [caseIds[0], caseIds[1]] } }).expect(400);
+    expect(res.body.message).toBe('Some selected test cases do not exist in this project');
+    expect(await ctx.prisma.testRun.count()).toBe(0);
   });
 
   it("closes the run with GitLab's message when the pipeline cannot be created", async () => {
@@ -89,10 +114,35 @@ describe('Automated runs (e2e)', () => {
     expect(res.body.completedAt).not.toBeNull();
   });
 
+  it('closes the run and asks the user to reconnect when GitLab answers 401 while creating the pipeline', async () => {
+    fake.tokens.delete(tessToken);
+
+    const res = await trigger({ branch: 'main', scope: { mode: 'ALL' } }).expect(403);
+    expect(res.body.details).toEqual({ code: 'GITLAB_NEEDS_RECONNECT' });
+    expect(res.body.message).toBe('Your GitLab connection expired – reconnect GitLab to continue');
+
+    const run = await ctx.prisma.testRun.findFirstOrThrow({ where: { projectId } });
+    expect(run).toMatchObject({ status: 'COMPLETED', pipelineId: null });
+    expect(run.note).toMatch(/^GitLab could not start the pipeline: /);
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.tester.id } });
+    expect(conn.state).toBe('NEEDS_RECONNECT');
+  });
+
   it('requires a GitLab connection before creating a run', async () => {
     const res = await trigger({ branch: 'main', scope: { mode: 'ALL' } }, actors.adminAuth).expect(403);
     expect(res.body.details).toEqual({ code: 'GITLAB_NOT_CONNECTED' });
     expect(await ctx.prisma.testRun.count()).toBe(0);
     expect(fake.pipelines).toHaveLength(0);
+  });
+
+  it('requires the project to be linked to GitLab', async () => {
+    const unlinked = await ctx.prisma.project.create({ data: { key: 'UNL', name: 'Unlinked', createdById: actors.admin.id } });
+    const res = await ctx
+      .http()
+      .post(`/api/projects/${unlinked.id}/runs/automated`)
+      .set(actors.testerAuth)
+      .send({ branch: 'main', scope: { mode: 'ALL' } });
+    expect(res.status).toBe(409);
+    expect(res.body.message).toBe('Project is not linked to a GitLab repository');
   });
 });

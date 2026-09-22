@@ -28,9 +28,10 @@ export interface CompleteOAuthResult {
 /** `reason` is one of invalid_state | denied | exchange_failed | already_linked. */
 export type CompleteOAuthFailureReason = 'invalid_state' | 'denied' | 'exchange_failed' | 'already_linked';
 
-const notConnected = () =>
+export const notConnected = () =>
   new ForbiddenException({ message: 'Connect GitLab to use automation', details: { code: GITLAB_NOT_CONNECTED } });
-const needsReconnect = () =>
+/** The standard 403 for a broken GitLab connection, shared with callers outside this service (e.g. the automated run trigger) so the web always sees the same reconnect prompt. */
+export const needsReconnect = () =>
   new ForbiddenException({
     message: 'Your GitLab connection expired – reconnect GitLab to continue',
     details: { code: GITLAB_NEEDS_RECONNECT },
