@@ -16,9 +16,25 @@ export class HttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost): void {
     const body = this.toBody(exception);
     if (body.statusCode >= 500) {
-      this.logger.error(exception instanceof Error ? exception.stack : String(exception));
+      if (this.isExpectedUpstreamFailure(exception)) {
+        // An upstream dependency (e.g. GitLab) failing is expected operational behaviour, not a
+        // bug in this service — log it as a one-line warning instead of an error with a stack
+        // trace, which is what an unexpected 500 gets below.
+        this.logger.warn(body.message);
+      } else {
+        this.logger.error(exception instanceof Error ? exception.stack : String(exception));
+      }
     }
     host.switchToHttp().getResponse().status(body.statusCode).json(body);
+  }
+
+  /** An `HttpException` deliberately thrown for a failed upstream call (its `details.source` marks where). */
+  private isExpectedUpstreamFailure(exception: unknown): boolean {
+    if (!(exception instanceof HttpException)) return false;
+    const response = exception.getResponse();
+    if (typeof response !== 'object' || response === null) return false;
+    const details = (response as { details?: unknown }).details;
+    return !!details && typeof details === 'object' && 'source' in details;
   }
 
   private toBody(exception: unknown): ErrorBody {

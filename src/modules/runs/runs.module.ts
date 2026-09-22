@@ -9,5 +9,6 @@ import { RunsService } from './runs.service';
   imports: [ProjectsModule],
   controllers: [RunsController, ResultsController],
   providers: [RunsService, ResultsService],
+  exports: [RunsService],
 })
 export class RunsModule {}

@@ -35,35 +35,49 @@ enum ResultStatus {
   SKIPPED
 }
 
+enum GitlabConnectionState {
+  ACTIVE
+  NEEDS_RECONNECT
+}
+
 model User {
-  id              String       @id @default(uuid())
-  name            String
-  email           String       @unique
-  passwordHash    String
-  role            Role         @default(TESTER)
-  active          Boolean      @default(true)
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
-  projectsCreated Project[]    @relation("ProjectCreatedBy")
-  casesCreated    TestCase[]   @relation("CaseCreatedBy")
-  casesUpdated    TestCase[]   @relation("CaseUpdatedBy")
-  runsCreated     TestRun[]    @relation("RunCreatedBy")
-  resultsExecuted TestResult[] @relation("ResultExecutedBy")
+  id                String             @id @default(uuid())
+  name              String
+  email             String             @unique
+  passwordHash      String
+  role              Role               @default(TESTER)
+  active            Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  projectsCreated   Project[]          @relation("ProjectCreatedBy")
+  casesCreated      TestCase[]         @relation("CaseCreatedBy")
+  casesUpdated      TestCase[]         @relation("CaseUpdatedBy")
+  runsCreated       TestRun[]          @relation("RunCreatedBy")
+  runsTriggered     TestRun[]          @relation("RunTriggeredBy") // Phase 2
+  resultsExecuted   TestResult[]       @relation("ResultExecutedBy")
+  gitlabConnection  GitlabConnection? // Phase 2
+  gitlabOAuthStates GitlabOAuthState[] // Phase 2
 }
 
 model Project {
-  id          String          @id @default(uuid())
-  name        String
-  key         String          @unique
-  description String?
-  createdById String
-  createdBy   User            @relation("ProjectCreatedBy", fields: [createdById], references: [id])
-  archivedAt  DateTime?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  modules     ProjectModule[]
-  testCases   TestCase[]
-  runs        TestRun[]
+  id                   String          @id @default(uuid())
+  name                 String
+  key                  String          @unique
+  description          String?
+  createdById          String
+  createdBy            User            @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+  archivedAt           DateTime?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  gitlabProjectId      Int? // Phase 2
+  gitlabPath           String? // Phase 2, e.g. mobile/ninja-store
+  gitlabWebUrl         String? // Phase 2
+  defaultBranch        String? // Phase 2
+  testsPath            String? // Phase 2, e.g. e2e
+  playwrightConfigPath String? // Phase 2
+  modules              ProjectModule[]
+  testCases            TestCase[]
+  runs                 TestRun[]
 }
 
 model ProjectModule {
@@ -107,21 +121,29 @@ model TestCase {
 }
 
 model TestRun {
-  id          String       @id @default(uuid())
-  projectId   String
-  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  name        String
-  build       String?
-  environment String?
-  type        RunType      @default(MANUAL)
-  status      RunStatus    @default(IN_PROGRESS)
-  createdById String
-  createdBy   User         @relation("RunCreatedBy", fields: [createdById], references: [id])
-  startedAt   DateTime     @default(now())
-  completedAt DateTime?
-  results     TestResult[]
+  id             String       @id @default(uuid())
+  projectId      String
+  project        Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name           String
+  build          String?
+  environment    String?
+  type           RunType      @default(MANUAL)
+  status         RunStatus    @default(IN_PROGRESS)
+  createdById    String
+  createdBy      User         @relation("RunCreatedBy", fields: [createdById], references: [id])
+  startedAt      DateTime     @default(now())
+  completedAt    DateTime?
+  branch         String? // Phase 2
+  pipelineId     Int? // Phase 2
+  pipelineWebUrl String? // Phase 2
+  pipelineStatus String? // Phase 2: created | pending | running | success | failed | canceled | …
+  triggeredById  String? // Phase 2
+  triggeredBy    User?        @relation("RunTriggeredBy", fields: [triggeredById], references: [id], onDelete: SetNull) // Phase 2
+  note           String? // Phase 2
+  results        TestResult[]
 
   @@index([projectId, startedAt])
+  @@index([type, status])
 }
 
 model TestResult {
@@ -137,6 +159,8 @@ model TestResult {
   durationMs   Int?
   errorMessage String?
   errorStack   String?
+  file         String? // Phase 2: test file of an automated result
+  artifactsUrl String? // Phase 2: GitLab job artifacts browser
   executedById String?
   executedBy   User?        @relation("ResultExecutedBy", fields: [executedById], references: [id])
   executedAt   DateTime?
@@ -144,4 +168,32 @@ model TestResult {
 
   @@unique([runId, testCaseId])
   @@index([testCaseId])
+}
+
+model GitlabConnection {
+  id              String                @id @default(uuid())
+  userId          String                @unique
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gitlabUserId    Int                   @unique
+  username        String
+  avatarUrl       String?
+  accessTokenEnc  String
+  refreshTokenEnc String
+  expiresAt       DateTime
+  state           GitlabConnectionState @default(ACTIVE)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+}
+
+model GitlabOAuthState {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stateHash       String    @unique
+  codeVerifierEnc String
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([userId])
 }

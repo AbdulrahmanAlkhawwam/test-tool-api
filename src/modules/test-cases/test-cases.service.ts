@@ -62,12 +62,22 @@ export class TestCasesService {
     };
   }
 
-  async create(projectId: string, dto: CreateTestCaseDto, user: AuthUser) {
+  /**
+   * `db` defaults to the top-level client but accepts a `Prisma.TransactionClient` so a caller
+   * (e.g. creating a case from an unlinked automated result) can create the case and use it in the
+   * same surrounding transaction.
+   */
+  async create(
+    projectId: string,
+    dto: CreateTestCaseDto,
+    user: AuthUser,
+    db: PrismaService | Prisma.TransactionClient = this.prisma,
+  ) {
     await this.projects.requireProject(projectId);
     const module = await this.requireModuleInProject(projectId, dto.moduleId);
     const maxAttempts = 5;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const existing = await this.prisma.testCase.findMany({
+      const existing = await db.testCase.findMany({
         where: { projectId, code: { startsWith: `TC-${module.code}-` } },
         select: { code: true },
       });
@@ -76,11 +86,11 @@ export class TestCasesService {
         // Write with a minimal select, then read relations back outside Prisma's implicit
         // write transaction: an include here would load the relations in parallel on the
         // transaction's single pinned pg client (pg concurrent-query deprecation).
-        const { id } = await this.prisma.testCase.create({
+        const { id } = await db.testCase.create({
           data: { ...dto, code, projectId, createdById: user.id, updatedById: user.id },
           select: { id: true },
         });
-        return this.findWithRelations(id);
+        return this.findWithRelations(id, db);
       } catch (e) {
         if (!isUniqueViolation(e) || attempt === maxAttempts) throw e;
       }
@@ -129,8 +139,8 @@ export class TestCasesService {
     return this.findWithRelations(id);
   }
 
-  private findWithRelations(id: string) {
-    return this.prisma.testCase.findUniqueOrThrow({ where: { id }, include: CASE_INCLUDE });
+  private findWithRelations(id: string, db: PrismaService | Prisma.TransactionClient = this.prisma) {
+    return db.testCase.findUniqueOrThrow({ where: { id }, include: CASE_INCLUDE });
   }
 
   async remove(id: string, user: AuthUser): Promise<void> {

@@ -1,0 +1,90 @@
+import { BadRequestException } from '@nestjs/common';
+
+/** Branch names accepted from clients: GitLab refs without spaces, "..", "//" or a leading "/". */
+export const BRANCH_NAME_RE = /^(?!\/)(?!.*\/\/)(?!.*\.\.)[A-Za-z0-9._\-/]{1,200}$/;
+
+/**
+ * `playwrightConfigPath` is spliced unquoted into the CI snippet's shell command (`--config
+ * <path>`, see `ci-snippet.ts`) that testers copy verbatim into `.gitlab-ci.yml`, so it can only
+ * contain characters that are safe there: no whitespace, `$`, quotes, backticks or other shell
+ * metacharacters that could break out of that command.
+ */
+export const SAFE_CONFIG_PATH_RE = /^[A-Za-z0-9._\-/]+$/;
+
+/** Every branch the tool commits to starts with this prefix, so it can never be the default branch. */
+export const WORK_BRANCH_PREFIX = 'tests/';
+
+/**
+ * Control characters, a backtick (which would break out of the Markdown code span the MR
+ * description wraps paths in), plus the Unicode bidi/format and invisible controls sometimes used
+ * to disguise a path in a UI: none belongs in a repo path.
+ *
+ * \x00-\x1f       C0 control characters
+ * \x7f            DEL
+ * \x80-\x9f       C1 control characters
+ * \u061c          Arabic Letter Mark
+ * \u200b-\u200f   zero-width space/non-joiner/joiner, left-to-right/right-to-left marks
+ * \u2028-\u2029   line/paragraph separator
+ * \u202a-\u202e   left-to-right/right-to-left embedding/override, pop directional formatting
+ * \u2066-\u2069   left-to-right/right-to-left/first-strong isolate, pop directional isolate
+ * \ufeff          zero-width no-break space / byte order mark
+ */
+const INVALID_CHARS_RE = /[\x00-\x1f\x7f\x80-\x9f`\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/;
+
+/** Repository-relative path with "/" separators, no surrounding or doubled slashes, no "." / ".." segments. */
+export function normalizeRepoPath(raw: string): string {
+  const path = raw.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!path) throw new BadRequestException('Path is required');
+  if (INVALID_CHARS_RE.test(path)) throw new BadRequestException('Path contains invalid characters');
+  for (const segment of path.split('/')) {
+    const trimmed = segment.trim();
+    // A segment that is only "." or ".." once trimmed (e.g. " .." hiding inside "e2e/ ../x.ts")
+    // is just as much a traversal as an untrimmed one.
+    if (trimmed === '.' || trimmed === '..') {
+      throw new BadRequestException('Path must not contain "." or ".." segments');
+    }
+    // Leading/trailing whitespace elsewhere in a segment is never a legitimate file/dir name and
+    // can be used to smuggle confusable-looking paths past a naive comparison.
+    if (segment !== trimmed) throw new BadRequestException('Path contains invalid characters');
+  }
+  return path;
+}
+
+/** The normalized path, which must be the tests folder or inside it. */
+export function resolveInTestsPath(testsPath: string, raw: string): string {
+  const path = normalizeRepoPath(raw);
+  if (path !== testsPath && !path.startsWith(`${testsPath}/`)) {
+    throw new BadRequestException(`Path must be inside the tests folder "${testsPath}"`);
+  }
+  return path;
+}
+
+/** A writable file: inside the tests folder and ending in .ts or .js (covers .spec.ts / .test.ts). */
+export function resolveEditablePath(testsPath: string, raw: string): string {
+  const path = resolveInTestsPath(testsPath, raw);
+  if (!/\.(ts|js)$/.test(path)) {
+    throw new BadRequestException('Only .ts and .js files can be edited (for example login.spec.ts)');
+  }
+  return path;
+}
+
+/**
+ * `tests/<gitlab-username>/`. A "/" can never appear inside a GitLab username, so one user's
+ * prefix can never match the start of another user's branch (e.g. "tess" vs. "tess-dev").
+ */
+export function workBranchPrefix(gitlabUsername: string): string {
+  return `${WORK_BRANCH_PREFIX}${gitlabUsername.toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}/`;
+}
+
+/** tests/<gitlab-username>/<slug>, the slug made from the short work name the user types on first save. */
+export function workBranchName(gitlabUsername: string, workName: string): string {
+  const slug = workName
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/, '');
+  if (!slug) throw new BadRequestException('The work name must contain letters or digits');
+  return `${workBranchPrefix(gitlabUsername)}${slug}`;
+}

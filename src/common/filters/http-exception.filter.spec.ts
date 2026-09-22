@@ -1,4 +1,4 @@
-import { ArgumentsHost, BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
+import { ArgumentsHost, BadGatewayException, BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { ThrottlerException } from '@nestjs/throttler';
 import { Prisma } from '@prisma/client';
 import { HttpExceptionFilter } from './http-exception.filter';
@@ -14,6 +14,10 @@ function run(exception: unknown) {
 }
 
 describe('HttpExceptionFilter', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   it('formats a Nest HttpException', () => {
     expect(run(new NotFoundException('Project not found'))).toEqual({
       status: 404,
@@ -79,10 +83,24 @@ describe('HttpExceptionFilter', () => {
 
   it('hides unexpected errors behind a generic 500', () => {
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     expect(run(new Error('database password is xyz'))).toEqual({
       status: 500,
       body: { statusCode: 500, error: 'Internal Server Error', message: 'Internal server error' },
     });
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('logs an expected upstream 502 (details.source) as a one-line warning, not an error with a stack trace', () => {
+    const errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const exception = new BadGatewayException({ message: 'GitLab request failed: boom', details: { source: 'gitlab' } });
+
+    expect(run(exception)).toEqual({
+      status: 502,
+      body: { statusCode: 502, error: 'Bad Gateway', message: 'GitLab request failed: boom', details: { source: 'gitlab' } },
+    });
+    expect(warnSpy).toHaveBeenCalledWith('GitLab request failed: boom');
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });
