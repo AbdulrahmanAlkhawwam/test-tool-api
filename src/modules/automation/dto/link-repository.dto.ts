@@ -1,6 +1,6 @@
 import { IsInt, IsString, Matches, MaxLength, Min, MinLength } from 'class-validator';
 import { IsOptionalNonNull } from '../../../common/decorators/is-optional-non-null.decorator';
-import { BRANCH_NAME_RE } from '../paths';
+import { BRANCH_NAME_RE, SAFE_CONFIG_PATH_RE } from '../paths';
 
 export class LinkRepositoryDto {
   /** GitLab project id (from GET /api/gitlab/projects). */
@@ -25,5 +25,6 @@ export class LinkRepositoryDto {
   @IsString()
   @MinLength(1)
   @MaxLength(300)
+  @Matches(SAFE_CONFIG_PATH_RE, { message: "The Playwright config path can't contain spaces or special characters" })
   playwrightConfigPath?: string;
 }

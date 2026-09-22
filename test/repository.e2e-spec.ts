@@ -58,6 +58,14 @@ describe('Repository link (e2e)', () => {
     await link({ gitlabProjectId: 101, testsPath: 'e2e', defaultBranch: 'bad branch' }).expect(400);
   });
 
+  it("rejects a playwrightConfigPath with whitespace or shell metacharacters (it's spliced unquoted into the CI snippet)", async () => {
+    for (const bad of ['config/pw config.ts', 'config/$(rm -rf /).ts', 'config/`whoami`.ts', "config/'; rm -rf /.ts", 'config/"x".ts']) {
+      const res = await link({ gitlabProjectId: 101, testsPath: 'e2e', playwrightConfigPath: bad }).expect(400);
+      expect(res.body.message).toBe('Validation failed');
+      expect(res.body.details[0]).toContain("The Playwright config path can't contain spaces or special characters");
+    }
+  });
+
   it('lets only admins link or unlink', async () => {
     await ctx.http().put(url()).set(actors.testerAuth).send({ gitlabProjectId: 101, testsPath: 'e2e' }).expect(403);
     await ctx.http().delete(url()).set(actors.testerAuth).expect(403);

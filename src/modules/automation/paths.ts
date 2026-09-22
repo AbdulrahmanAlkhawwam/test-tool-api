@@ -3,6 +3,14 @@ import { BadRequestException } from '@nestjs/common';
 /** Branch names accepted from clients: GitLab refs without spaces, "..", "//" or a leading "/". */
 export const BRANCH_NAME_RE = /^(?!\/)(?!.*\/\/)(?!.*\.\.)[A-Za-z0-9._\-/]{1,200}$/;
 
+/**
+ * `playwrightConfigPath` is spliced unquoted into the CI snippet's shell command (`--config
+ * <path>`, see `ci-snippet.ts`) that testers copy verbatim into `.gitlab-ci.yml`, so it can only
+ * contain characters that are safe there: no whitespace, `$`, quotes, backticks or other shell
+ * metacharacters that could break out of that command.
+ */
+export const SAFE_CONFIG_PATH_RE = /^[A-Za-z0-9._\-/]+$/;
+
 /** Every branch the tool commits to starts with this prefix, so it can never be the default branch. */
 export const WORK_BRANCH_PREFIX = 'tests/';
 
