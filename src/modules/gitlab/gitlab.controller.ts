@@ -33,7 +33,7 @@ export class GitlabController {
   }
 
   /**
-   * The web app calls this after GitLab redirects it to `WEB_URL/gitlab/callback`. This route is
+   * The web app calls this after GitLab redirects it to its own `/gitlab/callback`. This route is
    * authenticated (not public): binding completion to the signed-in user is what stops one user
    * from linking another's GitLab tokens to their own account by replaying that user's authorizeUrl.
    */

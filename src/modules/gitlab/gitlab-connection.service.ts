@@ -154,7 +154,7 @@ export class GitlabConnectionService {
 
   /**
    * Completes the OAuth flow for the signed-in user. GitLab redirects the browser to
-   * `WEB_URL/gitlab/callback`; the web app then calls this endpoint with the code/state.
+   * the web app's `/gitlab/callback`; the web app then calls this endpoint with the code/state.
    * Requiring the caller to be authenticated as the state's own owner (rather than accepting a
    * public, stateless callback) stops one tool user from linking another's GitLab tokens to their
    * own account by sending them their `authorizeUrl` — the state is looked up but never consumed

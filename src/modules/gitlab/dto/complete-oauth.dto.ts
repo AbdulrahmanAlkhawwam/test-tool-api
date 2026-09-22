@@ -1,6 +1,6 @@
 import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 
-/** Body the web app sends after GitLab redirects it to WEB_URL/gitlab/callback. */
+/** Body the web app sends after GitLab redirects it to its own /gitlab/callback. */
 export class CompleteOAuthDto {
   @IsString()
   @IsNotEmpty()

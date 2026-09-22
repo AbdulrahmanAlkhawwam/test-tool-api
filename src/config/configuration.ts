@@ -26,8 +26,6 @@ export interface GitlabConfig {
   clientSecret: string;
   redirectUri: string;
   tokenEncryptionKey: string;
-  /** Where the OAuth callback sends the browser back to. */
-  webUrl: string;
   /** Pipeline poller interval; 0 disables the interval (tests call pollOnce directly). */
   pollIntervalMs: number;
   /** Automated runs still unfinished after this long are closed. */
@@ -78,7 +76,6 @@ export function parseGitlabConfig(env: NodeJS.ProcessEnv): GitlabConfig {
     clientSecret: env.GITLAB_OAUTH_CLIENT_SECRET ?? '',
     redirectUri: env.GITLAB_OAUTH_REDIRECT_URI ?? '',
     tokenEncryptionKey: env.TOKEN_ENCRYPTION_KEY ?? '',
-    webUrl: stripSlash(env.WEB_URL ?? 'http://localhost:3001'),
     pollIntervalMs: parsePollIntervalMs(env.GITLAB_POLL_INTERVAL_MS, 20_000),
     runTimeoutMs: parseNonNegativeInt(env.GITLAB_RUN_TIMEOUT_MINUTES, 120) * 60_000,
     requestTimeoutMs: parseNonNegativeInt(env.GITLAB_REQUEST_TIMEOUT_MS, 15_000),

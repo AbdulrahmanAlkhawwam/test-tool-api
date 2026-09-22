@@ -29,7 +29,6 @@ describe('parseGitlabConfig', () => {
       clientSecret: '',
       redirectUri: '',
       tokenEncryptionKey: '',
-      webUrl: 'http://localhost:3001',
       pollIntervalMs: 20_000,
       runTimeoutMs: 7_200_000,
       requestTimeoutMs: 15_000,
@@ -43,7 +42,6 @@ describe('parseGitlabConfig', () => {
       GITLAB_OAUTH_CLIENT_SECRET: 'secret',
       GITLAB_OAUTH_REDIRECT_URI: 'https://api.test/api/gitlab/oauth/callback',
       TOKEN_ENCRYPTION_KEY: KEY,
-      WEB_URL: 'https://tests.ejad.net/',
       GITLAB_POLL_INTERVAL_MS: '5000',
       GITLAB_RUN_TIMEOUT_MINUTES: '30',
       GITLAB_REQUEST_TIMEOUT_MS: '5000',
@@ -51,7 +49,6 @@ describe('parseGitlabConfig', () => {
     expect(config).toMatchObject({
       enabled: true,
       url: 'https://git.ejad.net',
-      webUrl: 'https://tests.ejad.net',
       pollIntervalMs: 5000,
       runTimeoutMs: 1_800_000,
       requestTimeoutMs: 5000,

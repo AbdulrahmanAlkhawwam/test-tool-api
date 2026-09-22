@@ -72,7 +72,7 @@ automation endpoint answers 404, and `GET /api/gitlab/status` returns `{ enabled
 In GitLab (**Admin Area → Applications → New application**, or a group-owned application):
 
 - **Name:** Ejad Test Cases
-- **Redirect URI:** `${WEB_URL}/gitlab/callback` — the **web** app, not the API. GitLab redirects the
+- **Redirect URI:** `<web app URL>/gitlab/callback` — the **web** app, not the API. GitLab redirects the
   browser here after the user authorizes; the web page then calls the authenticated
   `POST /api/gitlab/oauth/complete` with the returned `code`/`state`, which binds the new tokens to
   whichever user is signed in on that browser. There is no public API-side OAuth callback — a stateless
@@ -83,16 +83,15 @@ Copy the Application ID and Secret into the API environment.
 
 ### 2. API environment
 
-Every `GITLAB_*` variable the API reads (see `src/config/configuration.ts`), plus the few non-prefixed
-ones GitLab features also need:
+Every `GITLAB_*` variable the API reads (see `src/config/configuration.ts`), plus the one non-prefixed
+variable GitLab features also need:
 
 | Variable | Example |
 |---|---|
 | `GITLAB_URL` | `https://git.ejad.net` (leave empty to disable every GitLab/automation endpoint) |
 | `GITLAB_OAUTH_CLIENT_ID`, `GITLAB_OAUTH_CLIENT_SECRET` | from step 1 |
-| `GITLAB_OAUTH_REDIRECT_URI` | `${WEB_URL}/gitlab/callback` (must match step 1 exactly) |
+| `GITLAB_OAUTH_REDIRECT_URI` | Must be `<web app URL>/gitlab/callback` (must match step 1 exactly) |
 | `TOKEN_ENCRYPTION_KEY` | 32 random bytes, base64: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
-| `WEB_URL` | `https://<web-host>` (default `http://localhost:3001`) – where the OAuth redirect and links back to the web app go |
 | `GITLAB_POLL_INTERVAL_MS` | `20000` (default). `0` turns the pipeline poller off; any other value must be `1000`–`3600000` (1 second to 1 hour) or it falls back to the default |
 | `GITLAB_RUN_TIMEOUT_MINUTES` | `120` (default) – unfinished automated runs are closed after this |
 | `GITLAB_REQUEST_TIMEOUT_MS` | `15000` (default) – per-request timeout for calls to GitLab's API |
@@ -140,6 +139,11 @@ Pipelines started from the tool set `EJAD_RUN_ID`, and `EJAD_TEST_PATH` / `EJAD_
 folder/file or selected cases. Other jobs in the file also run in these pipelines unless their `rules`
 skip `$EJAD_RUN_ID`.
 
+The tool triggers pipelines by sending `EJAD_RUN_ID` etc. as **pipeline variables**, using each tester's
+own GitLab permissions. Newer GitLab versions can restrict who is allowed to do that: check
+**Settings → CI/CD → Variables → "Minimum role to use pipeline variables"** and make sure it allows the
+role every connected tester has in this project, or their triggers will fail.
+
 ### 5. Linking tests to test cases
 
 Put the case ID as a tag in the Playwright test title, e.g. `test('logs in @TC-AUTH-001', …)`. When the
@@ -159,10 +163,11 @@ default branch, tests folder, Playwright config path).
 
 Reading and editing test files goes through the GitLab API, never the local disk:
 
-- Files **over 1 MB** are downloaded and shown but marked **read-only** (`MAX_EDITABLE_BYTES`); saving is
-  refused with 413.
+- Files **over 1 MB** are downloaded and shown but marked **read-only** (`MAX_EDITABLE_BYTES`). Saving a
+  new file, or an existing one, over that size is refused with 413; an existing file's size is checked
+  with a HEAD request first, so its content is never downloaded just to reject it.
 - Files **over 5 MB** can't be opened at all (`MAX_VIEWABLE_BYTES`): the API never downloads their
-  content, just reports the size with a 413.
+  content, just answers 413.
 - Files that aren't valid UTF-8 are shown but **read-only**.
 - Only `.ts`/`.js` files under the project's `testsPath` can be edited; everything else in `testsPath` is
   viewable but read-only.
