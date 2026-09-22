@@ -3,13 +3,16 @@ import { GitlabModule } from '../gitlab/gitlab.module';
 import { ProjectsModule } from '../projects/projects.module';
 import { AutomationController } from './automation.controller';
 import { AutomationService } from './automation.service';
+import { CoverageCache } from './coverage-cache';
+import { CoverageController } from './coverage.controller';
+import { CoverageService } from './coverage.service';
 import { RepositoryController } from './repository.controller';
 import { RepositoryService } from './repository.service';
 
 @Module({
   imports: [GitlabModule, ProjectsModule],
-  controllers: [RepositoryController, AutomationController],
-  providers: [RepositoryService, AutomationService],
+  controllers: [RepositoryController, AutomationController, CoverageController],
+  providers: [RepositoryService, AutomationService, CoverageService, CoverageCache],
   exports: [AutomationService],
 })
 export class AutomationModule {}
