@@ -54,4 +54,14 @@ describe('GitLab disabled (e2e)', () => {
     const project = await seedProject(ctx.prisma, actors.admin.id, { key: 'RUNS' });
     await expectHidden('post', `/api/projects/${project.id}/runs/automated`, { branch: 'main', scope: { mode: 'ALL' } });
   });
+
+  it('hides the CI snippet and create-case endpoints', async () => {
+    const project = await seedProject(ctx.prisma, actors.admin.id, { key: 'SNIP' });
+    await expectHidden('get', `/api/projects/${project.id}/automation/ci-snippet`);
+    await expectHidden(
+      'post',
+      '/api/runs/7a1d0c5e-0000-4000-8000-000000000000/results/7a1d0c5e-0000-4000-8000-000000000001/create-case',
+      { moduleId: '7a1d0c5e-0000-4000-8000-000000000002' },
+    );
+  });
 });
