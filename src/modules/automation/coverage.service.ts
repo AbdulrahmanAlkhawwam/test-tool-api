@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { mapWithConcurrency } from '../../common/concurrency';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GitlabApiService } from '../gitlab/gitlab-api.service';
@@ -16,6 +17,10 @@ const MAX_SCANNED_FILES = 500;
  * size first, so a multi-megabyte fixture never gets downloaded just to find out it's too big.
  */
 const MAX_SCANNED_FILE_BYTES = 1024 * 1024;
+/** At most this many HEAD/GET calls to GitLab run at once while scanning a project's test files. */
+const MAX_CONCURRENT_SCANS = 6;
+
+type ScanResult = FileTags | { path: string; skipped: true };
 
 @Injectable()
 export class CoverageService {
@@ -58,19 +63,27 @@ export class CoverageService {
   }
 
   private async scanFiles(token: string, pid: number, commitSha: string, paths: string[]): Promise<FileScan> {
-    const scanned: FileTags[] = [];
-    const skippedFiles: string[] = [];
-    for (const path of paths) {
+    const results = await mapWithConcurrency(paths, MAX_CONCURRENT_SCANS, async (path): Promise<ScanResult> => {
       // Learn the size before downloading anything: a huge fixture should never be pulled into
       // memory just to be scanned for @TC tags.
       const head = await this.api.headFile(token, pid, commitSha, path);
-      if (!head) continue; // Deleted between the tree listing and this read.
-      if (head.size > MAX_SCANNED_FILE_BYTES) {
-        skippedFiles.push(path);
-        continue;
-      }
+      // A file missing at either point (deleted between the tree listing and the HEAD, or between
+      // the HEAD and this GET) still belongs in the report as an untagged file rather than
+      // silently vanishing from it: `codes: []` covers both.
+      if (!head) return { path, codes: [] };
+      if (head.size > MAX_SCANNED_FILE_BYTES) return { path, skipped: true };
       const file = await this.api.getFile(token, pid, commitSha, path);
-      scanned.push({ path, codes: file ? extractCaseTags(file.content) : [] });
+      return { path, codes: file ? extractCaseTags(file.content) : [] };
+    });
+
+    const scanned: FileTags[] = [];
+    const skippedFiles: string[] = [];
+    // `results` is already in `paths` order (mapWithConcurrency preserves input order); the loop
+    // below just partitions it, so `scanned`'s order stays deterministic regardless of which
+    // HEAD/GET call actually finished first.
+    for (const result of results) {
+      if ('skipped' in result) skippedFiles.push(result.path);
+      else scanned.push(result);
     }
     return { files: scanned, skippedFiles: skippedFiles.sort() };
   }
