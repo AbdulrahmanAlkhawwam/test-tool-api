@@ -51,6 +51,7 @@ export class RunsService {
       include: {
         project: { select: { id: true, key: true, name: true } },
         createdBy: USER_REF,
+        triggeredBy: USER_REF,
         results: {
           include: {
             executedBy: USER_REF,

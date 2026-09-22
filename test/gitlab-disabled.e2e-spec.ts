@@ -49,4 +49,9 @@ describe('GitLab disabled (e2e)', () => {
     await expectHidden('get', `${base}/file?path=e2e/a.spec.ts`);
     await expectHidden('put', `${base}/file`, { path: 'e2e/a.spec.ts', content: 'x', branchSlug: 'x' });
   });
+
+  it('hides the automated run trigger', async () => {
+    const project = await seedProject(ctx.prisma, actors.admin.id, { key: 'RUNS' });
+    await expectHidden('post', `/api/projects/${project.id}/runs/automated`, { branch: 'main', scope: { mode: 'ALL' } });
+  });
 });
