@@ -153,4 +153,16 @@ describe('Test cases (e2e)', () => {
     const c = await ctx.http().post(`/api/projects/${projectId}/test-cases`).set(actors.testerAuth).send(body()).expect(201);
     expect(c.body.code).toBe('TC-AUTH-003');
   });
+
+  it('creates cases as approved and web-authored by default', async () => {
+    const created = await ctx.http().post(`/api/projects/${projectId}/test-cases`).set(actors.testerAuth).send(body()).expect(201);
+    expect(created.body).toMatchObject({ reviewState: 'APPROVED', createdVia: 'WEB', approvedById: null, approvedAt: null });
+
+    const draft = await seedCase(ctx.prisma, {
+      projectId, moduleId: authModuleId, userId: actors.admin.id, code: 'TC-AUTH-900',
+      reviewState: 'AI_DRAFT', createdVia: 'AI',
+    });
+    const detail = await ctx.http().get(`/api/test-cases/${draft.id}`).set(actors.testerAuth).expect(200);
+    expect(detail.body).toMatchObject({ reviewState: 'AI_DRAFT', createdVia: 'AI' });
+  });
 });

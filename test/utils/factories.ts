@@ -1,4 +1,4 @@
-import { Priority, Role } from '@prisma/client';
+import { CreatedVia, Priority, ReviewState, Role } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { hashPassword } from '../../src/common/password';
 import { PrismaService } from '../../src/prisma/prisma.service';
@@ -51,7 +51,17 @@ export async function seedModule(prisma: PrismaService, projectId: string, data:
 
 export async function seedCase(
   prisma: PrismaService,
-  data: { projectId: string; moduleId: string; userId: string; code: string; name?: string; priority?: Priority },
+  data: {
+    projectId: string;
+    moduleId: string;
+    userId: string;
+    code: string;
+    name?: string;
+    priority?: Priority;
+    reviewState?: ReviewState;
+    createdVia?: CreatedVia;
+    expectedResult?: string;
+  },
 ) {
   return prisma.testCase.create({
     data: {
@@ -60,7 +70,9 @@ export async function seedCase(
       code: data.code,
       name: data.name ?? `Case ${data.code}`,
       priority: data.priority ?? Priority.MEDIUM,
-      expectedResult: 'Works',
+      expectedResult: data.expectedResult ?? 'Works',
+      reviewState: data.reviewState ?? ReviewState.APPROVED,
+      createdVia: data.createdVia ?? CreatedVia.WEB,
       createdById: data.userId,
       updatedById: data.userId,
     },

@@ -40,23 +40,48 @@ enum GitlabConnectionState {
   NEEDS_RECONNECT
 }
 
+enum ReviewState {
+  APPROVED
+  AI_DRAFT
+}
+
+enum CreatedVia {
+  WEB
+  IMPORT
+  AI
+}
+
+enum SuggestionStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+enum ApiTokenPurpose {
+  MCP // Phase 2 of the MCP work may add RUNNER
+}
+
 model User {
-  id                String             @id @default(uuid())
-  name              String
-  email             String             @unique
-  passwordHash      String
-  role              Role               @default(TESTER)
-  active            Boolean            @default(true)
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
-  projectsCreated   Project[]          @relation("ProjectCreatedBy")
-  casesCreated      TestCase[]         @relation("CaseCreatedBy")
-  casesUpdated      TestCase[]         @relation("CaseUpdatedBy")
-  runsCreated       TestRun[]          @relation("RunCreatedBy")
-  runsTriggered     TestRun[]          @relation("RunTriggeredBy") // Phase 2
-  resultsExecuted   TestResult[]       @relation("ResultExecutedBy")
-  gitlabConnection  GitlabConnection? // Phase 2
-  gitlabOAuthStates GitlabOAuthState[] // Phase 2
+  id                  String               @id @default(uuid())
+  name                String
+  email               String               @unique
+  passwordHash        String
+  role                Role                 @default(TESTER)
+  active              Boolean              @default(true)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  projectsCreated     Project[]            @relation("ProjectCreatedBy")
+  casesCreated        TestCase[]           @relation("CaseCreatedBy")
+  casesUpdated        TestCase[]           @relation("CaseUpdatedBy")
+  runsCreated         TestRun[]            @relation("RunCreatedBy")
+  runsTriggered       TestRun[]            @relation("RunTriggeredBy") // Phase 2
+  resultsExecuted     TestResult[]         @relation("ResultExecutedBy")
+  gitlabConnection    GitlabConnection? // Phase 2
+  gitlabOAuthStates   GitlabOAuthState[] // Phase 2
+  casesApproved       TestCase[]           @relation("CaseApprovedBy")
+  suggestionsCreated  TestCaseSuggestion[] @relation("SuggestionCreatedBy")
+  suggestionsResolved TestCaseSuggestion[] @relation("SuggestionResolvedBy")
+  apiTokens           ApiToken[]
 }
 
 model Project {
@@ -93,11 +118,11 @@ model ProjectModule {
 }
 
 model TestCase {
-  id             String        @id @default(uuid())
+  id             String               @id @default(uuid())
   projectId      String
-  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project        Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   moduleId       String
-  module         ProjectModule @relation(fields: [moduleId], references: [id], onDelete: Restrict)
+  module         ProjectModule        @relation(fields: [moduleId], references: [id], onDelete: Restrict)
   code           String
   name           String
   description    String?
@@ -105,19 +130,26 @@ model TestCase {
   steps          String?
   testData       String?
   expectedResult String?
-  priority       Priority      @default(MEDIUM)
+  priority       Priority             @default(MEDIUM)
   notes          String?
   createdById    String
-  createdBy      User          @relation("CaseCreatedBy", fields: [createdById], references: [id])
+  createdBy      User                 @relation("CaseCreatedBy", fields: [createdById], references: [id])
   updatedById    String
-  updatedBy      User          @relation("CaseUpdatedBy", fields: [updatedById], references: [id])
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  updatedBy      User                 @relation("CaseUpdatedBy", fields: [updatedById], references: [id])
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
   deletedAt      DateTime?
   results        TestResult[]
+  reviewState    ReviewState          @default(APPROVED)
+  createdVia     CreatedVia           @default(WEB)
+  approvedById   String?
+  approvedBy     User?                @relation("CaseApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt     DateTime?
+  suggestions    TestCaseSuggestion[]
 
   @@unique([projectId, code])
   @@index([projectId, moduleId])
+  @@index([projectId, reviewState])
 }
 
 model TestRun {
@@ -194,6 +226,42 @@ model GitlabOAuthState {
   expiresAt       DateTime
   usedAt          DateTime?
   createdAt       DateTime  @default(now())
+
+  @@index([userId])
+}
+
+/// One pending AI-proposed edit per approved test case. `changes` holds
+/// { field: { from, to } } for template fields only (see SUGGESTION_FIELDS).
+model TestCaseSuggestion {
+  id           String           @id @default(uuid())
+  testCaseId   String
+  testCase     TestCase         @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+  changes      Json
+  status       SuggestionStatus @default(PENDING)
+  rationale    String?
+  createdById  String
+  createdBy    User             @relation("SuggestionCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime         @default(now())
+  resolvedById String?
+  resolvedBy   User?            @relation("SuggestionResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt   DateTime?
+
+  @@index([testCaseId, status])
+}
+
+/// Personal access token. Only the SHA-256 hash and an 8-character prefix are stored.
+model ApiToken {
+  id         String          @id @default(uuid())
+  userId     String
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  purpose    ApiTokenPurpose @default(MCP)
+  tokenHash  String          @unique
+  prefix     String
+  expiresAt  DateTime
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime        @default(now())
 
   @@index([userId])
 }
