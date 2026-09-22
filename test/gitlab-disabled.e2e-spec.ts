@@ -40,4 +40,13 @@ describe('GitLab disabled (e2e)', () => {
     await expectHidden('put', `/api/projects/${project.id}/repository`, { gitlabProjectId: 101, testsPath: 'e2e' });
     await expectHidden('delete', `/api/projects/${project.id}/repository`);
   });
+
+  it('hides the automation file endpoints', async () => {
+    const project = await seedProject(ctx.prisma, actors.admin.id, { key: 'AUTO' });
+    const base = `/api/projects/${project.id}/automation`;
+    await expectHidden('get', `${base}/branches`);
+    await expectHidden('get', `${base}/tree`);
+    await expectHidden('get', `${base}/file?path=e2e/a.spec.ts`);
+    await expectHidden('put', `${base}/file`, { path: 'e2e/a.spec.ts', content: 'x', branchSlug: 'x' });
+  });
 });

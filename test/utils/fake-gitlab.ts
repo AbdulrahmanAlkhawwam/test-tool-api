@@ -23,7 +23,8 @@ export interface FakeProject {
   name: string;
   path_with_namespace: string;
   web_url: string;
-  default_branch: string;
+  /** null for a repository with no commits yet, matching GitLab's own `default_branch: null`. */
+  default_branch: string | null;
   ciEnabled: boolean;
   memberIds: Set<number>;
   branches: Map<string, FakeBranch>;
@@ -215,13 +216,29 @@ export class FakeGitlab {
     return project;
   }
 
+  /** A freshly created GitLab project with no commits: GitLab reports `default_branch: null` for these. */
+  addEmptyProject(data: { id: number; path: string; members?: FakeUser[] }): FakeProject {
+    const project: FakeProject = {
+      id: data.id,
+      name: data.path.split('/').pop()!,
+      path_with_namespace: data.path,
+      web_url: `${this.url}/${data.path}`,
+      default_branch: null,
+      ciEnabled: true,
+      memberIds: new Set((data.members ?? []).map((m) => m.id)),
+      branches: new Map(),
+    };
+    this.projects.set(project.id, project);
+    return project;
+  }
+
   addMember(projectId: number, user: FakeUser): void {
     this.projects.get(projectId)!.memberIds.add(user.id);
   }
 
   addBranch(projectId: number, name: string, from?: string): FakeBranch {
     const project = this.projects.get(projectId)!;
-    const source = project.branches.get(from ?? project.default_branch)!;
+    const source = project.branches.get(from ?? project.default_branch ?? '')!;
     const branch: FakeBranch = { name, commitId: source.commitId, files: new Map([...source.files].map(([k, v]) => [k, { ...v }])) };
     project.branches.set(name, branch);
     return branch;

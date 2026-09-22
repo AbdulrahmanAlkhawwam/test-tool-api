@@ -1,4 +1,4 @@
-import { FakeGitlab } from './utils/fake-gitlab';
+import { FakeGitlab, FakeUser } from './utils/fake-gitlab';
 import { seedActors, seedProject } from './utils/factories';
 import { createGitlabTestApp, SAMPLE_FILES, seedGitlabConnection } from './utils/gitlab';
 import { resetDb, TestContext } from './utils/test-app';
@@ -8,6 +8,7 @@ describe('Repository link (e2e)', () => {
   let fake: FakeGitlab;
   let actors: Awaited<ReturnType<typeof seedActors>>;
   let projectId: string;
+  let gitlabUser: FakeUser;
 
   beforeAll(async () => {
     ({ ctx, fake } = await createGitlabTestApp());
@@ -16,7 +17,7 @@ describe('Repository link (e2e)', () => {
     await resetDb(ctx.prisma);
     fake.reset();
     actors = await seedActors(ctx);
-    const { gitlabUser } = await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'admin' });
+    ({ gitlabUser } = await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'admin' }));
     fake.addProject({ id: 101, path: 'mobile/ninja-store', members: [gitlabUser], files: SAMPLE_FILES });
     projectId = (await seedProject(ctx.prisma, actors.admin.id)).id;
   });
@@ -65,6 +66,12 @@ describe('Repository link (e2e)', () => {
   it("returns GitLab's 404 for projects the admin cannot access", async () => {
     const res = await link({ gitlabProjectId: 999, testsPath: 'e2e' }).expect(404);
     expect(res.body).toEqual({ statusCode: 404, error: 'Not Found', message: '404 Project Not Found', details: { source: 'gitlab' } });
+  });
+
+  it('refuses to link a GitLab project that has no default branch yet', async () => {
+    fake.addEmptyProject({ id: 202, path: 'mobile/empty-repo', members: [gitlabUser] });
+    const res = await link({ gitlabProjectId: 202, testsPath: 'e2e' }).expect(400);
+    expect(res.body.message).toBe('mobile/empty-repo has no default branch yet – push a first commit');
   });
 
   it('unlinks the repository and keeps existing runs', async () => {
