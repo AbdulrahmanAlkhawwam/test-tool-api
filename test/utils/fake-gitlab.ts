@@ -618,6 +618,13 @@ export class FakeGitlab {
         actions: { action: string; file_path: string; content: string; last_commit_id?: string }[];
       };
       let branch = p.branches.get(body.branch);
+      if (branch && body.start_branch) {
+        // Real GitLab rejects a commit with `start_branch` when `branch` already exists, regardless
+        // of what the actions themselves would do — the caller asked to create it from a starting
+        // point that no longer applies. Callers that raced to create the same work branch see this.
+        res.status(400).json({ message: `A branch called '${body.branch}' already exists` });
+        return;
+      }
       if (!branch) {
         const start = body.start_branch ? p.branches.get(body.start_branch) : undefined;
         if (!start) {

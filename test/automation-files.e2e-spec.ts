@@ -151,6 +151,18 @@ describe('Automation files (e2e)', () => {
     expect(tooBig.body.message).toBe('Files larger than 1 MB are read-only');
   });
 
+  it('refuses to overwrite an existing file over 1 MB with a HEAD check, without ever downloading it', async () => {
+    const big = `// ${'x'.repeat(1024 * 1024)}\n`;
+    fake.setFile(P, 'main', 'e2e/big.spec.ts', big);
+    // The new content itself is tiny — only the existing file on GitLab is oversized, so this can
+    // only be caught by checking its size (a HEAD request) before deciding whether to proceed.
+    const res = await save({ path: 'e2e/big.spec.ts', content: 'small replacement', branchSlug: 'shrink' }).expect(413);
+    expect(res.body.message).toBe('Files larger than 1 MB are read-only');
+    expect(fake.requestsTo('/repository/files', 'HEAD').length).toBeGreaterThan(0);
+    expect(fake.requestsTo('/repository/files', 'GET')).toHaveLength(0);
+    expect(fake.requestsTo('/repository/commits')).toHaveLength(0);
+  });
+
   it('refuses to open files over 5 MB without ever downloading their content', async () => {
     const huge = `// ${'x'.repeat(6 * 1024 * 1024)}\n`;
     fake.setFile(P, 'main', 'e2e/huge.spec.ts', huge);
@@ -215,6 +227,33 @@ describe('Automation files (e2e)', () => {
     const res = await pending;
     expect(res.status).toBe(409);
     expect(res.body.message).toBe('This file changed on the branch – reload it before saving');
+  });
+
+  it('retries the commit without start_branch when a concurrent first save already created the work branch', async () => {
+    const release = fake.holdCommitRequests();
+    // Two different files, both saved for the first time to the same not-yet-existing work branch:
+    // both see branchExists === false and so both pass start_branch, but only one commit can win the
+    // race to actually create the branch.
+    const first = save({ path: LOGIN, content: 'from first', lastCommitId: mainCommit(LOGIN), branchSlug: 'Login fixes' }).then((r) => r);
+    const second = save({
+      path: 'e2e/auth/logout.spec.ts',
+      content: "test('logs out @TC-AUTH-004', async () => {});\n",
+      branchSlug: 'Login fixes',
+    }).then((r) => r);
+    await waitForRequests(fake, '/repository/commits', 2);
+    release();
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(fake.file(P, WORK_BRANCH, LOGIN)!.content).toBe('from first');
+    expect(fake.file(P, WORK_BRANCH, 'e2e/auth/logout.spec.ts')!.content).toContain('logs out');
+    // The two initial attempts (both with start_branch, since neither yet knew the branch existed)
+    // plus exactly one retry without start_branch for whichever request lost the race to create it
+    // — not a file-exists conflict, since the two saves are for different files.
+    const commits = fake.requestsTo('/repository/commits');
+    expect(commits).toHaveLength(3);
+    expect(commits.filter((r) => !('start_branch' in (r.body as object)))).toHaveLength(1);
   });
 
   it('rejects the default-branch guard when a project links a default branch shaped like a work branch', async () => {

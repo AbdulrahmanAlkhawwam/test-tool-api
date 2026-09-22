@@ -139,45 +139,77 @@ export class AutomationService {
 
     return this.gitlab.withToken(user.id, async (token) => {
       const branchExists = (await this.api.getBranch(token, pid, branch)) !== null;
-      const current = await this.api.getFile(token, pid, branchExists ? branch : project.defaultBranch, path);
-      if (current && !dto.lastCommitId) {
+      const baseRef = branchExists ? branch : project.defaultBranch;
+
+      // HEAD first: an existing file's size decides whether it can be edited at all, before any of
+      // its content is downloaded (a file over the limit must never be pulled into memory just to
+      // reject it).
+      const head = await this.api.headFile(token, pid, baseRef, path);
+      if (head && head.size > MAX_EDITABLE_BYTES) {
+        throw new PayloadTooLargeException('Files larger than 1 MB are read-only');
+      }
+      if (head && !dto.lastCommitId) {
         throw new ConflictException(FILE_EXISTS_MESSAGE);
       }
-      if ((current && dto.lastCommitId !== current.lastCommitId) || (!current && dto.lastCommitId)) {
+      if ((head && dto.lastCommitId !== head.lastCommitId) || (!head && dto.lastCommitId)) {
         throw new ConflictException(STALE_FILE_MESSAGE);
       }
-      // The client only sees readOnly: true for this; enforce it here too, since re-reading the
-      // bytes through the file read above is all that's needed to check.
-      if (current && !current.isValidUtf8) {
-        throw new BadRequestException(NOT_UTF8_MESSAGE);
+      // The client only sees readOnly: true for this; enforce it here too, by re-reading the bytes
+      // (now known to be within the editable size budget, so this never downloads an oversized file).
+      if (head) {
+        const current = await this.api.getFile(token, pid, baseRef, path);
+        if (current && !current.isValidUtf8) {
+          throw new BadRequestException(NOT_UTF8_MESSAGE);
+        }
       }
 
-      const isUpdate = current !== null;
+      const isUpdate = head !== null;
+      const commitOnce = (startBranch: string | undefined) =>
+        this.api.createCommit(token, pid, {
+          branch,
+          startBranch,
+          message: `${isUpdate ? 'Update' : 'Add'} ${path} (Ejad test cases)`,
+          actions: [{ action: isUpdate ? 'update' : 'create', filePath: path, content: dto.content, lastCommitId: head?.lastCommitId }],
+        });
+
       let commit: GitlabCommit;
       try {
-        commit = await this.api.createCommit(token, pid, {
-          branch,
-          startBranch: branchExists ? undefined : project.defaultBranch,
-          message: `${isUpdate ? 'Update' : 'Add'} ${path} (Ejad test cases)`,
-          actions: [{ action: isUpdate ? 'update' : 'create', filePath: path, content: dto.content, lastCommitId: current?.lastCommitId }],
-        });
+        commit = await commitOnce(branchExists ? undefined : project.defaultBranch);
       } catch (e) {
-        // A push between our check and the commit: GitLab rejects it. A create that now finds the
-        // file (or the branch) already there is the file-exists conflict; an update whose branch
-        // moved on ("changed since" / "doesn't exist") is the generic stale-file conflict.
-        if (e instanceof GitlabHttpError && e.status === 400) {
-          if (!isUpdate && /already exists/i.test(e.message)) {
-            throw new ConflictException(FILE_EXISTS_MESSAGE);
+        if (!branchExists && e instanceof GitlabHttpError && e.status === 400 && /branch .* already exists/i.test(e.message)) {
+          // A concurrent first save to this same work branch won the race to create it. It exists
+          // now, so retry the exact same commit without start_branch instead of failing the save.
+          try {
+            commit = await commitOnce(undefined);
+          } catch (e2) {
+            throw this.toSaveConflict(e2, isUpdate);
           }
-          if (isUpdate && /changed since|doesn't exist/i.test(e.message)) {
-            throw new ConflictException(STALE_FILE_MESSAGE);
-          }
+        } else {
+          throw this.toSaveConflict(e, isUpdate);
         }
-        throw e;
       }
 
       return { branch, commitId: commit.id, mergeRequest: await this.openOrUpdateMergeRequest(token, pid, project.defaultBranch, branch, dto, path, commit) };
     });
+  }
+
+  /**
+   * Maps a failed commit to the conflict the caller should see. A push between our check and the
+   * commit: GitLab rejects it. A create that now finds the file already there is the file-exists
+   * conflict; an update whose branch moved on ("changed since" / "doesn't exist") is the generic
+   * stale-file conflict. Anything else (including a GitlabHttpError for something unrelated) is
+   * passed through unchanged.
+   */
+  private toSaveConflict(e: unknown, isUpdate: boolean): unknown {
+    if (e instanceof GitlabHttpError && e.status === 400) {
+      if (!isUpdate && /already exists/i.test(e.message)) {
+        return new ConflictException(FILE_EXISTS_MESSAGE);
+      }
+      if (isUpdate && /changed since|doesn't exist/i.test(e.message)) {
+        return new ConflictException(STALE_FILE_MESSAGE);
+      }
+    }
+    return e;
   }
 
   /**
