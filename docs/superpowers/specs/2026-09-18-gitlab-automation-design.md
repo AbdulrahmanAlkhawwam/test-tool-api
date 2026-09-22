@@ -19,7 +19,7 @@ Success criteria:
 
 1. A tester connects their GitLab account once; an admin links a project to a GitLab repo + tests folder.
 2. The Automation tab shows the tests folder tree, opens files in a code editor, and "Save" produces a
-   commit on `tests/<username>-<slug>` plus an open merge request (link shown).
+   commit on `tests/<username>/<slug>` plus an open merge request (link shown).
 3. "Run tests" starts a pipeline as the tester; the run page shows pipeline status; when it finishes, each
    `@TC-AUTH-001`-tagged test fills that case's result (Passed/Failed/Skipped, error, duration) with links to
    GitLab artifacts; untagged tests appear as Unlinked.
@@ -39,9 +39,8 @@ dropped), storing screenshots in the tool (GitLab artifacts are linked instead),
 GITLAB_URL=https://git.ejad.net
 GITLAB_OAUTH_CLIENT_ID=…            # OAuth application registered once by a GitLab admin
 GITLAB_OAUTH_CLIENT_SECRET=…
-GITLAB_OAUTH_REDIRECT_URI=https://<api-host>/api/gitlab/oauth/callback
+GITLAB_OAUTH_REDIRECT_URI=https://<web-host>/gitlab/callback   # the WEB app's callback page, not the API
 TOKEN_ENCRYPTION_KEY=<32-byte base64> # AES-256-GCM for stored GitLab tokens
-WEB_URL=https://<web-host>           # where the OAuth callback returns the browser
 ```
 OAuth application scopes: `api` (needed for commits, merge requests and pipelines). If `GITLAB_URL` is not
 set, all GitLab features are hidden and their endpoints return 404.
@@ -49,12 +48,20 @@ set, all GitLab features are hidden and their endpoints return 404.
 ## 4. GitLab connection (per user)
 
 - **Profile → GitLab → Connect** starts OAuth authorization code flow with **PKCE** and a signed,
-  single-use `state` (10-minute expiry, bound to the user). Callback exchanges the code, stores the access
-  and refresh tokens **encrypted** (AES-256-GCM, random IV) with GitLab user id/username/avatar, and
-  redirects to `WEB_URL/profile?gitlab=connected`.
+  single-use `state` (10-minute expiry, bound to the user, stored only as a SHA-256 hash). GitLab redirects
+  the browser to the **web app's** `/gitlab/callback` page, which POSTs `{ code, state, error? }` to the
+  **authenticated** `POST /api/gitlab/oauth/complete`. The API accepts it only if the state belongs to the
+  signed-in user (another user's state is rejected and not consumed), exchanges the code, stores the access
+  and refresh tokens **encrypted** (AES-256-GCM, random IV) with GitLab user id/username/avatar, and answers
+  `{ status: 'connected', username }`; the page then goes to `/profile?gitlab=connected` (or
+  `?gitlab=error&reason=invalid_state|denied|exchange_failed|already_linked`). A GitLab account can be linked
+  to only one Ejad user. *(Amended: the original design used a public, state-only API callback, which
+  allowed one user to complete another user's authorization.)*
 - Tokens are refreshed automatically when expired (GitLab tokens expire after 2 h); a failed refresh marks
   the connection **needs reconnect** and the UI asks the user to reconnect.
-- **Disconnect** revokes the token at GitLab (best effort) and deletes it.
+- Refresh is race-safe: it re-reads the connection and writes conditionally on the old refresh token; only
+  a GitLab 400/401 on refresh marks **needs reconnect** (network errors and 5xx do not).
+- **Disconnect** deletes the connection, then revokes its token at GitLab (best effort).
 - All GitLab calls for a request are made **with the current user's token**; if they aren't connected,
   GitLab features show "Connect GitLab to use automation".
 
@@ -71,12 +78,16 @@ The project header shows a repository link. Unlinking clears these fields (runs 
 - **File tree** of `testsPath` on the selected branch (default branch, or the user's work branch if it
   exists): `GET /repository/tree?path&ref&recursive=true` (paginated).
 - **Editor:** Monaco editor (`@monaco-editor/react`), TypeScript/JavaScript highlighting; read via
-  `GET /repository/files/:path/raw?ref`. Files > 1 MB open read-only.
+  the GitLab files API (size checked first with a HEAD request). Files > 1 MB, non-`.ts`/`.js` files and
+  files that aren't valid UTF-8 open read-only; files > 5 MB can't be opened (413).
 - **Save:** commits the changed file(s) with `POST /repository/commits` to the user's work branch
-  `tests/<gitlab-username>-<slug>` (slug from a short name the user gives on first save, e.g. "login
+  `tests/<gitlab-username>/<slug>` (slug from a short name the user gives on first save, e.g. "login
   fixes"); the branch is created from `defaultBranch` on first save (`start_branch`). Then opens or updates
   one merge request per work branch (`POST/PUT /merge_requests`, target = defaultBranch, title from the
-  slug, description lists edited files and linked case codes). The tab shows the MR link and state.
+  slug, description lists edited files and linked case codes). The tab shows the MR link and state. If
+  the commit lands but the MR step fails, the save still succeeds with `mergeRequest: null`.
+  *(Amended: the branch separator is `/` because `-` may appear in GitLab usernames, which let one user's
+  prefix match another user's branches.)*
   Conflicts (file changed on the branch since it was opened — detected via `last_commit_id`) → 409 with
   "This file changed on the branch – reload it before saving".
 - **New file:** create inside `testsPath` only (path validated: no `..`, must end in `.spec.ts`/`.test.ts`/
@@ -167,16 +178,16 @@ Attachment) are **not** created.
 ```
 GET    /api/gitlab/status                       { enabled, connection: { username, state } | null }
 GET    /api/gitlab/oauth/start                  → { authorizeUrl }
-GET    /api/gitlab/oauth/callback               (public; state-verified) → redirect to WEB_URL
+POST   /api/gitlab/oauth/complete               (authenticated) { code?, state, error? } → { status, username }
 DELETE /api/gitlab/connection
 GET    /api/gitlab/projects?search=             (admin; for linking)
 PUT    /api/projects/:id/repository             (admin) { gitlabProjectId, defaultBranch, testsPath, playwrightConfigPath }
 DELETE /api/projects/:id/repository             (admin)
 GET    /api/projects/:id/automation/branches    default + the user's work branches (+ MR state)
 GET    /api/projects/:id/automation/tree?ref=
-GET    /api/projects/:id/automation/file?ref=&path=     → { content, lastCommitId, size }
-PUT    /api/projects/:id/automation/file        { path, content, lastCommitId?, branchSlug } → { branch, commitId, mergeRequest }
-GET    /api/projects/:id/automation/coverage?ref=
+GET    /api/projects/:id/automation/file?ref=&path=     → { path, ref, content, lastCommitId, size, readOnly }
+PUT    /api/projects/:id/automation/file        { path, content, lastCommitId?, branchSlug } → { branch, commitId, mergeRequest | null }
+GET    /api/projects/:id/automation/coverage?ref=   (files > 1 MB are skipped and listed in skippedFiles)
 POST   /api/projects/:id/runs/automated         { branch, scope: { mode: ALL|PATH|CASES, path?, caseIds? } } → run
 GET    /api/projects/:id/automation/ci-snippet  → the YAML above
 POST   /api/runs/:runId/results/:resultId/create-case   (unlinked → new test case, pre-filled) 
@@ -186,7 +197,8 @@ connection NEEDS_RECONNECT; 403/404 are returned to the UI with GitLab's message
 
 ## 10. Web changes
 
-- Profile: **GitLab** card (Connect / Reconnect / Disconnect, username + avatar).
+- Profile: **GitLab** card (Connect / Reconnect / Disconnect, username + avatar); `/gitlab/callback` page
+  completes the connection.
 - Project Settings → **Repository** (admins): GitLab project search, default branch, tests folder,
   Playwright config path; shows the repo link.
 - Project header: repository link when linked.
