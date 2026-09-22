@@ -41,9 +41,27 @@ const completionFailed = (reason: CompleteOAuthFailureReason) =>
 /** GitLab statuses that mean the refresh token itself was rejected (and only these mark NEEDS_RECONNECT). */
 const isRefreshRejected = (e: GitlabHttpError) => e.status === 400 || e.status === 401;
 
-/** Whether a P2002 unique-constraint violation was on `gitlabUserId` (Prisma's `target` can be a string or a string[]). */
+/**
+ * Whether a P2002 unique-constraint violation was on `gitlabUserId`.
+ *
+ * Prisma 7 with the `@prisma/adapter-pg` driver adapter never sets `meta.target` for a Postgres
+ * unique violation (that field comes from Prisma's own query engine, which the driver-adapter path
+ * bypasses). Instead the adapter's mapped `23505` error is carried as `meta.driverAdapterError`,
+ * whose `.cause.constraint` is `{ index: string }` (the constraint/index name, when Postgres
+ * reported one) or `{ fields: string[] }` (parsed from the DETAIL message otherwise) — see
+ * `mapDriverError`'s `"23505"` case in `@prisma/client/runtime/client.js` and `case "23505"` in
+ * `@prisma/adapter-pg`'s `dist/index.js`. `meta.target` is kept as a fallback for any Prisma
+ * version/driver combination that does still populate it.
+ */
 const violatesGitlabUserId = (e: Prisma.PrismaClientKnownRequestError): boolean => {
-  const target = e.meta?.target;
+  const meta = e.meta as
+    | { target?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown; fields?: unknown } } } }
+    | undefined;
+  const constraint = meta?.driverAdapterError?.cause?.constraint;
+  if (typeof constraint?.index === 'string' && constraint.index.includes('gitlabUserId')) return true;
+  if (Array.isArray(constraint?.fields) && constraint.fields.includes('gitlabUserId')) return true;
+
+  const target = meta?.target;
   if (Array.isArray(target)) return target.includes('gitlabUserId');
   if (typeof target === 'string') return target.includes('gitlabUserId');
   return false;
@@ -71,6 +89,31 @@ export class GitlabConnectionService {
 
   private get cfg(): GitlabConfig {
     return this.config.getOrThrow<GitlabConfig>('gitlab');
+  }
+
+  /**
+   * Best-effort revoke of a *stored, encrypted* token: decrypts and revokes, swallowing any
+   * failure. `this.cipher.decrypt` throws synchronously, so calling it directly inline before a
+   * `.catch()` is attached (e.g. `this.api.revokeToken(this.cipher.decrypt(enc)).catch(...)`)
+   * lets a decrypt failure escape as an unhandled throw instead of being caught — which would turn
+   * an otherwise-completed delete/link into a 500. Wrapping the decrypt inside the `.then()`
+   * callback ensures it can only ever reject the promise, never throw synchronously.
+   */
+  private bestEffortRevoke(enc: string): Promise<void> {
+    return Promise.resolve()
+      .then(() => this.api.revokeToken(this.cipher.decrypt(enc)))
+      .catch(() => {
+        // Best effort: nothing else to do if the token can't be decrypted or GitLab can't be reached.
+      });
+  }
+
+  /** Whether the stored, encrypted token decrypts to the given plaintext token (false if it can't be decrypted at all). */
+  private storesToken(enc: string, plaintext: string): boolean {
+    try {
+      return this.cipher.decrypt(enc) === plaintext;
+    } catch {
+      return false;
+    }
   }
 
   async status(userId: string): Promise<GitlabStatus> {
@@ -177,9 +220,11 @@ export class GitlabConnectionService {
       throw completionFailed('exchange_failed');
     }
 
-    // Re-linked from a different GitLab identity: best-effort revoke the old identity's token.
-    if (previousConnection && previousConnection.gitlabUserId !== gitlabUser.id) {
-      await this.api.revokeToken(this.cipher.decrypt(previousConnection.accessTokenEnc)).catch(() => {});
+    // Re-linked — either to a different GitLab identity, or the same identity re-authorized (GitLab
+    // always issues a fresh token pair): best-effort revoke whatever token was stored before, as
+    // long as it isn't the very one we just stored.
+    if (previousConnection && !this.storesToken(previousConnection.accessTokenEnc, tokens.accessToken)) {
+      await this.bestEffortRevoke(previousConnection.accessTokenEnc);
     }
     return { status: 'connected', username: gitlabUser.username };
   }
@@ -199,9 +244,8 @@ export class GitlabConnectionService {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') return; // no connection to disconnect
       throw e;
     }
-    await this.api.revokeToken(this.cipher.decrypt(connection.accessTokenEnc)).catch(() => {
-      // Best effort: the row is already gone locally either way.
-    });
+    // Best effort: the row is already gone locally either way.
+    await this.bestEffortRevoke(connection.accessTokenEnc);
   }
 
   async requireConnection(userId: string): Promise<GitlabConnection> {
@@ -300,12 +344,14 @@ export class GitlabConnectionService {
       },
     });
     if (updated.count === 0) {
-      // Someone else refreshed, or disconnected, between our re-read and this write.
+      // Someone else refreshed, or disconnected, between our re-read and this write — either way,
+      // this call's own freshly issued token was never stored anywhere, so it must be revoked
+      // regardless of what happened to the row (including when the row still exists, e.g. after a
+      // relink replaced the tokens: that new pair is what's live now, not this one).
+      await this.api.revokeToken(tokens.accessToken).catch(() => {});
       const after = await this.prisma.gitlabConnection.findUnique({ where: { id: fresh.id } });
-      if (!after) {
-        await this.api.revokeToken(tokens.accessToken).catch(() => {});
-        throw notConnected();
-      }
+      if (!after) throw notConnected();
+      if (after.state !== GitlabConnectionState.ACTIVE) throw needsReconnect();
       return this.cipher.decrypt(after.accessTokenEnc);
     }
     return tokens.accessToken;

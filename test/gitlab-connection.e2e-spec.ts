@@ -192,6 +192,83 @@ describe('GitLab connection (e2e)', () => {
     expect(fake.revoked).toContain(oldAccessToken);
   });
 
+  it('revokes the previous token when a user re-authorizes the same GitLab identity', async () => {
+    const { gitlabUser, accessToken: oldAccessToken } = await seedGitlabConnection(ctx, fake, actors.tester.id, { username: 'tess' });
+
+    const url = await startOAuth();
+    const code = fake.issueAuthCode(gitlabUser, url.searchParams.get('code_challenge')!, REDIRECT_URI);
+    const state = url.searchParams.get('state')!;
+
+    const res = await complete(actors.testerAuth, { code, state }).expect(200);
+    expect(res.body).toEqual({ status: 'connected', username: 'tess' });
+
+    const issued = fake.issued.at(-1)!;
+    expect(fake.revoked).toContain(oldAccessToken);
+    expect(fake.revoked).not.toContain(issued.accessToken);
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.tester.id } });
+    expect(ctx.app.get(TokenCipher).decrypt(conn.accessTokenEnc)).toBe(issued.accessToken);
+  });
+
+  it("does not 500 when the previous connection's stored token can't be decrypted (best-effort revoke)", async () => {
+    const { gitlabUser } = await seedGitlabConnection(ctx, fake, actors.tester.id, { username: 'tess' });
+    // Corrupt the stored token so `this.cipher.decrypt(...)` throws when the service tries to
+    // best-effort revoke it during the relink below.
+    await ctx.prisma.gitlabConnection.update({ where: { userId: actors.tester.id }, data: { accessTokenEnc: 'v1:not-valid-ciphertext' } });
+
+    const url = await startOAuth();
+    const code = fake.issueAuthCode(gitlabUser, url.searchParams.get('code_challenge')!, REDIRECT_URI);
+    const state = url.searchParams.get('state')!;
+
+    const res = await complete(actors.testerAuth, { code, state }).expect(200);
+    expect(res.body).toEqual({ status: 'connected', username: 'tess' });
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.tester.id } });
+    expect(conn.state).toBe('ACTIVE');
+  });
+
+  it('detects a gitlabUserId conflict introduced after the pre-check passed (a real P2002 race) and revokes the new token', async () => {
+    const url = await startOAuth(actors.testerAuth);
+    const racer = fake.addUser({ username: 'racer' });
+    const code = fake.issueAuthCode(racer, url.searchParams.get('code_challenge')!, REDIRECT_URI);
+    const state = url.searchParams.get('state')!;
+    const cipher = ctx.app.get(TokenCipher);
+
+    // completeOAuth's own pre-check (`findUnique({ where: { gitlabUserId } })`) finds nothing, then
+    // a concurrent completion links this same GitLab identity to a different tool user before this
+    // call's `upsert` runs — so the real unique index (not the pre-check) is what has to catch it.
+    // Intercepting the pre-check itself to insert the conflicting row is the deterministic way to
+    // force that exact race every time, without depending on timing.
+    const originalFindUnique = ctx.prisma.gitlabConnection.findUnique.bind(ctx.prisma.gitlabConnection);
+    const spy = jest.spyOn(ctx.prisma.gitlabConnection, 'findUnique').mockImplementation((async (args: unknown) => {
+      const where = (args as { where?: { gitlabUserId?: number } }).where;
+      if (where?.gitlabUserId === racer.id) {
+        spy.mockRestore();
+        await ctx.prisma.gitlabConnection.create({
+          data: {
+            userId: actors.admin.id,
+            gitlabUserId: racer.id,
+            username: racer.username,
+            avatarUrl: null,
+            accessTokenEnc: cipher.encrypt('racer-access'),
+            refreshTokenEnc: cipher.encrypt('racer-refresh'),
+            expiresAt: new Date(Date.now() + 7_200_000),
+            state: 'ACTIVE',
+          },
+        });
+        return null;
+      }
+      return originalFindUnique(args as never);
+    }) as any);
+
+    const res = await complete(actors.testerAuth, { code, state }).expect(400);
+    expect(res.body.details).toEqual({ reason: 'already_linked' });
+
+    const issued = fake.issued.at(-1)!;
+    expect(fake.revoked).toContain(issued.accessToken);
+    expect(await ctx.prisma.gitlabConnection.count({ where: { userId: actors.tester.id } })).toBe(0);
+    const adminConn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.admin.id } });
+    expect(adminConn.gitlabUserId).toBe(racer.id);
+  });
+
   it('requires authentication to complete OAuth', async () => {
     await ctx.http().post('/api/gitlab/oauth/complete').send({ state: 'whatever' }).expect(401);
   });
@@ -203,6 +280,17 @@ describe('GitLab connection (e2e)', () => {
     expect(await ctx.prisma.gitlabConnection.count()).toBe(0);
     const status = await ctx.http().get('/api/gitlab/status').set(actors.testerAuth).expect(200);
     expect(status.body.connection).toBeNull();
+  });
+
+  it("does not 500 when the stored token can't be decrypted (best-effort revoke on disconnect)", async () => {
+    await seedGitlabConnection(ctx, fake, actors.tester.id);
+    // Corrupt the stored token so `this.cipher.decrypt(...)` throws when disconnect tries to
+    // best-effort revoke it — that must not turn an otherwise-completed delete into a 500.
+    await ctx.prisma.gitlabConnection.update({ where: { userId: actors.tester.id }, data: { accessTokenEnc: 'v1:not-valid-ciphertext' } });
+
+    await ctx.http().delete('/api/gitlab/connection').set(actors.testerAuth).expect(204);
+    expect(await ctx.prisma.gitlabConnection.count()).toBe(0);
+    expect(fake.revoked).toEqual([]);
   });
 
   it('revokes the freshly refreshed token when disconnect races an in-flight refresh', async () => {
@@ -348,5 +436,73 @@ describe('GitLab connection (e2e)', () => {
 
     const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.admin.id } });
     expect(conn.state).toBe('ACTIVE');
+  });
+
+  it("revokes its own freshly issued (never-stored) token, and returns the winner's, when a refresh loses to a concurrent relink", async () => {
+    const { gitlabUser } = await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'admin', expired: true });
+    fake.addProject({ id: 101, path: 'mobile/ninja-store', members: [gitlabUser] });
+    const cipher = ctx.app.get(TokenCipher);
+    const winnerTokens = fake.issueTokens(fake.addUser({ username: 'winner-identity' }));
+
+    // Simulate a concurrent relink landing between this refresh's re-read and its own conditional
+    // write: by the time that write runs, the row's tokens have already been replaced, so its
+    // WHERE clause (bound to the refresh token it originally saw) naturally matches zero rows.
+    const originalUpdateMany = ctx.prisma.gitlabConnection.updateMany.bind(ctx.prisma.gitlabConnection);
+    const spy = jest.spyOn(ctx.prisma.gitlabConnection, 'updateMany').mockImplementation((async (args: unknown) => {
+      const a = args as { data?: { state?: string }; where?: { refreshTokenEnc?: string } };
+      if (a.data?.state === 'ACTIVE' && a.where?.refreshTokenEnc) {
+        spy.mockRestore();
+        await ctx.prisma.gitlabConnection.update({
+          where: { userId: actors.admin.id },
+          data: {
+            accessTokenEnc: cipher.encrypt(winnerTokens.accessToken),
+            refreshTokenEnc: cipher.encrypt(winnerTokens.refreshToken),
+            expiresAt: new Date(Date.now() + 7_200_000),
+            state: 'ACTIVE',
+          },
+        });
+      }
+      return originalUpdateMany(args as never);
+    }) as any);
+
+    const issuedBefore = fake.issued.length;
+    const res = await ctx.http().get('/api/gitlab/projects').set(actors.adminAuth).expect(200);
+    expect(res.status).toBe(200);
+
+    const loserTokens = fake.issued[issuedBefore]!;
+    expect(fake.revoked).toContain(loserTokens.accessToken);
+    expect(fake.revoked).not.toContain(winnerTokens.accessToken);
+
+    const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.admin.id } });
+    expect(conn.state).toBe('ACTIVE');
+    expect(cipher.decrypt(conn.accessTokenEnc)).toBe(winnerTokens.accessToken);
+  });
+
+  it('answers 403 (not the stale token) when a refresh loses to a concurrent NEEDS_RECONNECT mark', async () => {
+    const { gitlabUser } = await seedGitlabConnection(ctx, fake, actors.admin.id, { username: 'admin', expired: true });
+    fake.addProject({ id: 101, path: 'mobile/ninja-store', members: [gitlabUser] });
+    const cipher = ctx.app.get(TokenCipher);
+
+    const originalUpdateMany = ctx.prisma.gitlabConnection.updateMany.bind(ctx.prisma.gitlabConnection);
+    const spy = jest.spyOn(ctx.prisma.gitlabConnection, 'updateMany').mockImplementation((async (args: unknown) => {
+      const a = args as { data?: { state?: string }; where?: { refreshTokenEnc?: string } };
+      if (a.data?.state === 'ACTIVE' && a.where?.refreshTokenEnc) {
+        spy.mockRestore();
+        // Change refreshTokenEnc too, so the pending write's WHERE clause misses (count 0) instead
+        // of clobbering this NEEDS_RECONNECT mark back to ACTIVE.
+        await ctx.prisma.gitlabConnection.update({
+          where: { userId: actors.admin.id },
+          data: { state: 'NEEDS_RECONNECT', refreshTokenEnc: cipher.encrypt('someone-elses-refresh-token') },
+        });
+      }
+      return originalUpdateMany(args as never);
+    }) as any);
+
+    const issuedBefore = fake.issued.length;
+    const res = await ctx.http().get('/api/gitlab/projects').set(actors.adminAuth).expect(403);
+    expect(res.body.details).toEqual({ code: 'GITLAB_NEEDS_RECONNECT' });
+
+    const loserTokens = fake.issued[issuedBefore]!;
+    expect(fake.revoked).toContain(loserTokens.accessToken);
   });
 });
