@@ -17,7 +17,7 @@ export class SaveFileDto {
   @Matches(/^[0-9a-f]{7,64}$/, { message: 'lastCommitId must be a commit SHA' })
   lastCommitId?: string;
 
-  /** Short work name, e.g. "login fixes" → branch tests/<gitlab-username>-login-fixes. */
+  /** Short work name, e.g. "login fixes" → branch tests/<gitlab-username>/login-fixes. */
   @IsString()
   @MinLength(1)
   @MaxLength(60)

@@ -7,10 +7,21 @@ export const BRANCH_NAME_RE = /^(?!\/)(?!.*\/\/)(?!.*\.\.)[A-Za-z0-9._\-/]{1,200
 export const WORK_BRANCH_PREFIX = 'tests/';
 
 /**
- * Control characters, plus the Unicode bidi/format controls sometimes used to disguise a path in
- * a UI (left-to-right/right-to-left marks and overrides, isolates): none belongs in a repo path.
+ * Control characters, a backtick (which would break out of the Markdown code span the MR
+ * description wraps paths in), plus the Unicode bidi/format and invisible controls sometimes used
+ * to disguise a path in a UI: none belongs in a repo path.
+ *
+ * \x00-\x1f       C0 control characters
+ * \x7f            DEL
+ * \x80-\x9f       C1 control characters
+ * \u061c          Arabic Letter Mark
+ * \u200b-\u200f   zero-width space/non-joiner/joiner, left-to-right/right-to-left marks
+ * \u2028-\u2029   line/paragraph separator
+ * \u202a-\u202e   left-to-right/right-to-left embedding/override, pop directional formatting
+ * \u2066-\u2069   left-to-right/right-to-left/first-strong isolate, pop directional isolate
+ * \ufeff          zero-width no-break space / byte order mark
  */
-const INVALID_CHARS_RE = /[\x00-\x1f‎‏‪-‮⁦-⁩]/;
+const INVALID_CHARS_RE = /[\x00-\x1f\x7f\x80-\x9f`\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/;
 
 /** Repository-relative path with "/" separators, no surrounding or doubled slashes, no "." / ".." segments. */
 export function normalizeRepoPath(raw: string): string {
@@ -49,11 +60,15 @@ export function resolveEditablePath(testsPath: string, raw: string): string {
   return path;
 }
 
+/**
+ * `tests/<gitlab-username>/`. A "/" can never appear inside a GitLab username, so one user's
+ * prefix can never match the start of another user's branch (e.g. "tess" vs. "tess-dev").
+ */
 export function workBranchPrefix(gitlabUsername: string): string {
-  return `${WORK_BRANCH_PREFIX}${gitlabUsername.toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}-`;
+  return `${WORK_BRANCH_PREFIX}${gitlabUsername.toLowerCase().replace(/[^a-z0-9._-]+/g, '-')}/`;
 }
 
-/** tests/<gitlab-username>-<slug>, the slug made from the short work name the user types on first save. */
+/** tests/<gitlab-username>/<slug>, the slug made from the short work name the user types on first save. */
 export function workBranchName(gitlabUsername: string, workName: string): string {
   const slug = workName
     .normalize('NFKD')
