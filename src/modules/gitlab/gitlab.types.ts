@@ -24,6 +24,15 @@ export interface GitlabFile {
   content: string;
   size: number;
   lastCommitId: string;
+  /** False when the decoded bytes are not valid UTF-8 (content is then a lossy decoding). */
+  isValidUtf8: boolean;
+}
+
+/** A file's metadata from a HEAD request, without downloading its content. */
+export interface GitlabFileHead {
+  size: number;
+  lastCommitId: string;
+  blobId: string;
 }
 
 export interface GitlabBranch {

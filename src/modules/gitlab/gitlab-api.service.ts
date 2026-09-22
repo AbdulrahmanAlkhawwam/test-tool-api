@@ -7,6 +7,7 @@ import {
   GitlabBranch,
   GitlabCommit,
   GitlabFile,
+  GitlabFileHead,
   GitlabJob,
   GitlabMergeRequest,
   GitlabPipeline,
@@ -83,6 +84,16 @@ const toMergeRequest = (m: RawMergeRequest): GitlabMergeRequest => ({
 });
 const toPipeline = (p: RawPipeline): GitlabPipeline => ({ id: p.id, status: p.status, ref: p.ref, webUrl: p.web_url, finishedAt: p.finished_at ?? null });
 
+/** Whether `bytes` decode as strict UTF-8 (a lossy decode never throws, so this needs its own check). */
+function isValidUtf8(bytes: Buffer): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Thin GitLab REST v4 + OAuth client on Node's fetch. Every REST call takes the acting user's token. */
 @Injectable()
 export class GitlabApiService {
@@ -153,7 +164,31 @@ export class GitlabApiService {
         `/projects/${projectId}/repository/files/${encodeURIComponent(path)}`,
         { ref },
       );
-      return { path: f.file_path, size: f.size, content: Buffer.from(f.content, 'base64').toString('utf8'), lastCommitId: f.last_commit_id };
+      const bytes = Buffer.from(f.content, 'base64');
+      return {
+        path: f.file_path,
+        size: f.size,
+        content: bytes.toString('utf8'),
+        lastCommitId: f.last_commit_id,
+        isValidUtf8: isValidUtf8(bytes),
+      };
+    } catch (e) {
+      if (e instanceof GitlabHttpError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  /** A file's size and last commit id without downloading its content (a HEAD request). */
+  async headFile(token: string, projectId: number, ref: string, path: string): Promise<GitlabFileHead | null> {
+    try {
+      const { headers } = await this.request<null>(token, 'HEAD', `/projects/${projectId}/repository/files/${encodeURIComponent(path)}`, {
+        query: { ref },
+      });
+      return {
+        size: Number(headers.get('x-gitlab-size')),
+        lastCommitId: headers.get('x-gitlab-last-commit-id') ?? '',
+        blobId: headers.get('x-gitlab-blob-id') ?? '',
+      };
     } catch (e) {
       if (e instanceof GitlabHttpError && e.status === 404) return null;
       throw e;

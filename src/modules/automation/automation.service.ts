@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException, PayloadTooLargeException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, PayloadTooLargeException } from '@nestjs/common';
 import { Project } from '@prisma/client';
 import { AuthUser } from '../../common/types/auth-user';
 import { GitlabApiService } from '../gitlab/gitlab-api.service';
@@ -13,7 +13,11 @@ import { buildMrDescription, mergeRequestTitle } from './mr-description';
 import { resolveEditablePath, resolveInTestsPath, workBranchName, workBranchPrefix } from './paths';
 
 export const MAX_EDITABLE_BYTES = 1024 * 1024;
+/** Above this, the file's content is never downloaded: the tool can't render it at all. */
+export const MAX_VIEWABLE_BYTES = 5 * 1024 * 1024;
 export const STALE_FILE_MESSAGE = 'This file changed on the branch – reload it before saving';
+export const FILE_EXISTS_MESSAGE = 'A file with this path already exists – open it before saving';
+export const NOT_UTF8_MESSAGE = "This file isn't UTF-8 text and can't be edited here";
 
 export type LinkedProject = Project & {
   gitlabProjectId: number;
@@ -30,10 +34,19 @@ export interface MergeRequestRef {
   state: GitlabMergeRequest['state'];
 }
 
+export interface SaveFileResult {
+  branch: string;
+  commitId: string;
+  /** Null when the commit landed but opening/updating the merge request failed (save still succeeded). */
+  mergeRequest: MergeRequestRef | null;
+}
+
 const toRef = (mr: GitlabMergeRequest): MergeRequestRef => ({ iid: mr.iid, webUrl: mr.webUrl, state: mr.state });
 
 @Injectable()
 export class AutomationService {
+  private readonly logger = new Logger(AutomationService.name);
+
   constructor(
     private readonly projects: ProjectsService,
     private readonly gitlab: GitlabConnectionService,
@@ -64,7 +77,7 @@ export class AutomationService {
     const prefix = workBranchPrefix(connection.username);
     return this.gitlab.withToken(user.id, async (token) => {
       const work = (await this.api.listBranches(token, project.gitlabProjectId, prefix))
-        .filter((b) => b.name.startsWith(prefix))
+        .filter((b) => b.name.startsWith(prefix) && b.name !== project.defaultBranch)
         .sort((a, b) => a.name.localeCompare(b.name));
       const branches: { name: string; isDefault: boolean; mergeRequest: MergeRequestRef | null }[] = [
         { name: project.defaultBranch, isDefault: true, mergeRequest: null },
@@ -88,23 +101,32 @@ export class AutomationService {
     const project = await this.requireLinked(projectId);
     const path = resolveInTestsPath(project.testsPath, query.path);
     const ref = query.ref ?? project.defaultBranch;
-    const file = await this.gitlab.withToken(user.id, (token) => this.api.getFile(token, project.gitlabProjectId, ref, path));
-    if (!file) throw new NotFoundException(`File "${path}" was not found on ${ref}`);
-    return {
-      path,
-      ref,
-      content: file.content,
-      lastCommitId: file.lastCommitId,
-      size: file.size,
-      readOnly: file.size > MAX_EDITABLE_BYTES || !/\.(ts|js)$/.test(path),
-    };
+    return this.gitlab.withToken(user.id, async (token) => {
+      // Learn the size before downloading anything: a multi-megabyte blob should never be pulled
+      // into memory just to tell the caller it can't be opened.
+      const head = await this.api.headFile(token, project.gitlabProjectId, ref, path);
+      if (!head) throw new NotFoundException(`File "${path}" was not found on ${ref}`);
+      if (head.size > MAX_VIEWABLE_BYTES) {
+        throw new PayloadTooLargeException("Files larger than 5 MB can't be opened here");
+      }
+      const file = await this.api.getFile(token, project.gitlabProjectId, ref, path);
+      if (!file) throw new NotFoundException(`File "${path}" was not found on ${ref}`);
+      return {
+        path,
+        ref,
+        content: file.content,
+        lastCommitId: file.lastCommitId,
+        size: file.size,
+        readOnly: file.size > MAX_EDITABLE_BYTES || !file.isValidUtf8 || !/\.(ts|js)$/.test(path),
+      };
+    });
   }
 
   /**
    * Commits one file to the caller's work branch (created from the default branch on first save)
    * and opens or updates that branch's merge request. Never commits to the default branch.
    */
-  async saveFile(projectId: string, dto: SaveFileDto, user: AuthUser) {
+  async saveFile(projectId: string, dto: SaveFileDto, user: AuthUser): Promise<SaveFileResult> {
     const project = await this.requireLinked(projectId);
     const path = resolveEditablePath(project.testsPath, dto.path);
     if (Buffer.byteLength(dto.content, 'utf8') > MAX_EDITABLE_BYTES) {
@@ -119,39 +141,89 @@ export class AutomationService {
       const branchExists = (await this.api.getBranch(token, pid, branch)) !== null;
       const current = await this.api.getFile(token, pid, branchExists ? branch : project.defaultBranch, path);
       if (current && !dto.lastCommitId) {
-        throw new ConflictException('A file with this path already exists – open it before saving');
+        throw new ConflictException(FILE_EXISTS_MESSAGE);
       }
       if ((current && dto.lastCommitId !== current.lastCommitId) || (!current && dto.lastCommitId)) {
         throw new ConflictException(STALE_FILE_MESSAGE);
       }
+      // The client only sees readOnly: true for this; enforce it here too, since re-reading the
+      // bytes through the file read above is all that's needed to check.
+      if (current && !current.isValidUtf8) {
+        throw new BadRequestException(NOT_UTF8_MESSAGE);
+      }
 
+      const isUpdate = current !== null;
       let commit: GitlabCommit;
       try {
         commit = await this.api.createCommit(token, pid, {
           branch,
           startBranch: branchExists ? undefined : project.defaultBranch,
-          message: `${current ? 'Update' : 'Add'} ${path} (Ejad test cases)`,
-          actions: [{ action: current ? 'update' : 'create', filePath: path, content: dto.content, lastCommitId: current?.lastCommitId }],
+          message: `${isUpdate ? 'Update' : 'Add'} ${path} (Ejad test cases)`,
+          actions: [{ action: isUpdate ? 'update' : 'create', filePath: path, content: dto.content, lastCommitId: current?.lastCommitId }],
         });
       } catch (e) {
-        // A push between our check and the commit: GitLab rejects the stale last_commit_id.
-        if (e instanceof GitlabHttpError && e.status === 400 && /changed since|already exists|doesn't exist/i.test(e.message)) {
-          throw new ConflictException(STALE_FILE_MESSAGE);
+        // A push between our check and the commit: GitLab rejects it. A create that now finds the
+        // file (or the branch) already there is the file-exists conflict; an update whose branch
+        // moved on ("changed since" / "doesn't exist") is the generic stale-file conflict.
+        if (e instanceof GitlabHttpError && e.status === 400) {
+          if (!isUpdate && /already exists/i.test(e.message)) {
+            throw new ConflictException(FILE_EXISTS_MESSAGE);
+          }
+          if (isUpdate && /changed since|doesn't exist/i.test(e.message)) {
+            throw new ConflictException(STALE_FILE_MESSAGE);
+          }
         }
         throw e;
       }
 
-      const codes = extractCaseTags(dto.content);
+      return { branch, commitId: commit.id, mergeRequest: await this.openOrUpdateMergeRequest(token, pid, project.defaultBranch, branch, dto, path, commit) };
+    });
+  }
+
+  /**
+   * Opens or updates the work branch's merge request after a commit has already landed. The
+   * commit is never rolled back on failure here: a merge request that couldn't be created or
+   * updated just means the caller gets `mergeRequest: null` back, not a failed save.
+   */
+  private async openOrUpdateMergeRequest(
+    token: string,
+    pid: number,
+    defaultBranch: string,
+    branch: string,
+    dto: SaveFileDto,
+    path: string,
+    commit: GitlabCommit,
+  ): Promise<MergeRequestRef | null> {
+    const codes = extractCaseTags(dto.content);
+    try {
       const [open] = await this.api.listMergeRequests(token, pid, { sourceBranch: branch, state: 'opened' });
-      const mr = open
-        ? await this.api.updateMergeRequest(token, pid, open.iid, { description: buildMrDescription(open.description, path, codes) })
-        : await this.api.createMergeRequest(token, pid, {
+      if (open) {
+        return toRef(await this.api.updateMergeRequest(token, pid, open.iid, { description: buildMrDescription(open.description, path, codes) }));
+      }
+      try {
+        return toRef(
+          await this.api.createMergeRequest(token, pid, {
             sourceBranch: branch,
-            targetBranch: project.defaultBranch,
+            targetBranch: defaultBranch,
             title: mergeRequestTitle(dto.branchSlug),
             description: buildMrDescription(null, path, codes),
-          });
-      return { branch, commitId: commit.id, mergeRequest: toRef(mr) };
-    });
+          }),
+        );
+      } catch (e) {
+        // Someone else opened one for this branch between our list and our create: reuse theirs.
+        if (e instanceof GitlabHttpError && e.status === 409) {
+          const [existing] = await this.api.listMergeRequests(token, pid, { sourceBranch: branch, state: 'opened' });
+          if (existing) {
+            return toRef(
+              await this.api.updateMergeRequest(token, pid, existing.iid, { description: buildMrDescription(existing.description, path, codes) }),
+            );
+          }
+        }
+        throw e;
+      }
+    } catch (e) {
+      this.logger.warn(`Commit ${commit.id} on ${branch} succeeded but opening/updating its merge request failed: ${(e as Error).message}`);
+      return null;
+    }
   }
 }

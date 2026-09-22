@@ -1,10 +1,10 @@
 import { FakeGitlab } from './utils/fake-gitlab';
 import { seedActors } from './utils/factories';
-import { createGitlabTestApp, GITLAB_PROJECT_ID as P, LOGIN_SPEC, seedGitlabConnection, seedLinkedProject } from './utils/gitlab';
+import { createGitlabTestApp, GITLAB_PROJECT_ID as P, LOGIN_SPEC, seedGitlabConnection, seedLinkedProject, waitForRequests } from './utils/gitlab';
 import { resetDb, TestContext } from './utils/test-app';
 
 const LOGIN = 'e2e/auth/login.spec.ts';
-const WORK_BRANCH = 'tests/tess-login-fixes';
+const WORK_BRANCH = 'tests/tess/login-fixes';
 
 describe('Automation files (e2e)', () => {
   let ctx: TestContext;
@@ -149,6 +149,89 @@ describe('Automation files (e2e)', () => {
     expect(res.body).toMatchObject({ readOnly: true, size: Buffer.byteLength(big) });
     const tooBig = await save({ path: 'e2e/big.spec.ts', content: big, lastCommitId: res.body.lastCommitId, branchSlug: 'big' }).expect(413);
     expect(tooBig.body.message).toBe('Files larger than 1 MB are read-only');
+  });
+
+  it('refuses to open files over 5 MB without ever downloading their content', async () => {
+    const huge = `// ${'x'.repeat(6 * 1024 * 1024)}\n`;
+    fake.setFile(P, 'main', 'e2e/huge.spec.ts', huge);
+    const res = await ctx.http().get(`${base()}/file`).query({ path: 'e2e/huge.spec.ts' }).set(actors.testerAuth).expect(413);
+    expect(res.body.message).toBe("Files larger than 5 MB can't be opened here");
+    expect(fake.requestsTo('/repository/files', 'HEAD')).toHaveLength(1);
+    expect(fake.requestsTo('/repository/files', 'GET')).toHaveLength(0);
+  });
+
+  it('opens a non-UTF-8 file read-only instead of returning lossy content as editable', async () => {
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x01]);
+    fake.setBinaryFile(P, 'main', 'e2e/fixture.spec.ts', binary);
+    const res = await ctx.http().get(`${base()}/file`).query({ path: 'e2e/fixture.spec.ts' }).set(actors.testerAuth).expect(200);
+    expect(res.body.readOnly).toBe(true);
+
+    const attempt = await save({
+      path: 'e2e/fixture.spec.ts',
+      content: 'replacement',
+      lastCommitId: res.body.lastCommitId,
+      branchSlug: 'fix',
+    }).expect(400);
+    expect(attempt.body.message).toBe("This file isn't UTF-8 text and can't be edited here");
+  });
+
+  it('opens a non-.ts/.js file read-only regardless of its content', async () => {
+    fake.setFile(P, 'main', 'e2e/notes.md', '# notes\n');
+    const res = await ctx.http().get(`${base()}/file`).query({ path: 'e2e/notes.md' }).set(actors.testerAuth).expect(200);
+    expect(res.body).toMatchObject({ readOnly: true });
+  });
+
+  it('reuses the merge request a concurrent request just created (409 on create)', async () => {
+    fake.forceNextMergeRequestCreateConflict();
+    const res = await save({ path: LOGIN, content: 'x', lastCommitId: mainCommit(LOGIN), branchSlug: 'Login fixes' }).expect(200);
+    expect(res.body.branch).toBe(WORK_BRANCH);
+    expect(res.body.mergeRequest).toMatchObject({ state: 'opened' });
+    // Exactly one MR exists: the create wasn't retried into a duplicate after the 409.
+    expect(fake.mergeRequests).toHaveLength(1);
+    expect(fake.mergeRequests[0]).toMatchObject({ source_branch: WORK_BRANCH, state: 'opened' });
+    expect(fake.mergeRequests[0].description).toContain('- `e2e/auth/login.spec.ts`');
+  });
+
+  it('still returns 200 with mergeRequest: null when the merge request step keeps failing after a successful commit', async () => {
+    fake.breakNextMergeRequestList();
+    const res = await save({ path: LOGIN, content: 'x', lastCommitId: mainCommit(LOGIN), branchSlug: 'Login fixes' }).expect(200);
+    expect(res.body).toMatchObject({ branch: WORK_BRANCH, mergeRequest: null });
+    expect(res.body.commitId).toBe(fake.branch(P, WORK_BRANCH)!.commitId);
+    expect(fake.file(P, WORK_BRANCH, LOGIN)!.content).toBe('x');
+  });
+
+  it('returns 409 when GitLab itself rejects a stale last_commit_id after our own pre-check passed', async () => {
+    await save({ path: LOGIN, content: 'first', lastCommitId: mainCommit(LOGIN), branchSlug: 'Login fixes' }).expect(200);
+    const readLastCommitId = fake.file(P, WORK_BRANCH, LOGIN)!.lastCommitId;
+
+    const release = fake.holdCommitRequests();
+    // `.then()` (not a bare assignment) is what actually dispatches a supertest request.
+    const pending = save({ path: LOGIN, content: 'second', lastCommitId: readLastCommitId, branchSlug: 'Login fixes' }).then((r) => r);
+    await waitForRequests(fake, '/repository/commits', 2);
+    // A push lands on the work branch after our pre-check read but before our own commit is let through.
+    fake.setFile(P, WORK_BRANCH, LOGIN, 'pushed from a laptop while we were mid-save');
+    release();
+
+    const res = await pending;
+    expect(res.status).toBe(409);
+    expect(res.body.message).toBe('This file changed on the branch – reload it before saving');
+  });
+
+  it('rejects the default-branch guard when a project links a default branch shaped like a work branch', async () => {
+    await ctx.prisma.project.update({ where: { id: projectId }, data: { defaultBranch: WORK_BRANCH } });
+    const res = await save({ path: LOGIN, content: 'x', lastCommitId: mainCommit(LOGIN), branchSlug: 'Login fixes' }).expect(400);
+    expect(res.body.message).toBe('The tool never commits to the default branch');
+  });
+
+  it('rejects an invalid ref', async () => {
+    const res = await ctx.http().get(`${base()}/tree`).query({ ref: 'bad branch' }).set(actors.testerAuth).expect(400);
+    expect(res.body.message).toBe('Validation failed');
+    expect(res.body.details[0]).toContain('ref is not a valid branch name');
+  });
+
+  it('refuses automation routes for a user with no GitLab connection', async () => {
+    const res = await ctx.http().get(`${base()}/tree`).set(actors.adminAuth).expect(403);
+    expect(res.body.details).toMatchObject({ code: 'GITLAB_NOT_CONNECTED' });
   });
 
   it('requires a linked repository', async () => {

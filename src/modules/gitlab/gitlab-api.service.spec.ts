@@ -52,8 +52,29 @@ describe('GitlabApiService (against the fake GitLab)', () => {
       content: "test('a @TC-AUTH-001')",
       size: 22,
       lastCommitId: fake.file(7, 'main', 'e2e/a.spec.ts')!.lastCommitId,
+      isValidUtf8: true,
     });
     expect(await api.getFile(token, 7, 'main', 'e2e/missing.ts')).toBeNull();
+  });
+
+  it('flags content that is not valid UTF-8, without corrupting the bytes actually read', async () => {
+    fake.addProject({ id: 7, path: 'group/app', members: [user], files: { 'e2e/a.spec.ts': 'text' } });
+    fake.setBinaryFile(7, 'main', 'e2e/bin.spec.ts', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x01]));
+    const file = await api.getFile(token, 7, 'main', 'e2e/bin.spec.ts');
+    expect(file!.isValidUtf8).toBe(false);
+    expect(file!.size).toBe(8);
+  });
+
+  it('gets a file\'s size and last commit id via HEAD without a body, and returns null when missing', async () => {
+    fake.addProject({ id: 7, path: 'group/app', members: [user], files: { 'e2e/a.spec.ts': "test('a @TC-AUTH-001')" } });
+    const head = await api.headFile(token, 7, 'main', 'e2e/a.spec.ts');
+    expect(head).toEqual({
+      size: 22,
+      lastCommitId: fake.file(7, 'main', 'e2e/a.spec.ts')!.lastCommitId,
+      blobId: expect.any(String),
+    });
+    expect(fake.requestsTo('/repository/files', 'HEAD')).toHaveLength(1);
+    expect(await api.headFile(token, 7, 'main', 'e2e/missing.ts')).toBeNull();
   });
 
   it('commits to a new branch from start_branch and opens a merge request', async () => {

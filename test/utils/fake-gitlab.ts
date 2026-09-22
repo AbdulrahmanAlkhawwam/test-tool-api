@@ -12,6 +12,11 @@ export interface FakeUser {
 export interface FakeFile {
   content: string;
   lastCommitId: string;
+  /**
+   * The file's raw bytes, when they aren't just `content` re-encoded as UTF-8 (e.g. a fixture
+   * that is deliberately not valid UTF-8). Falls back to `Buffer.from(content, 'utf8')`.
+   */
+  bytes?: Buffer;
 }
 export interface FakeBranch {
   name: string;
@@ -103,8 +108,11 @@ export class FakeGitlab {
   private seq = 1;
   private server?: Server;
   private tokenGate: (() => Promise<void>) | null = null;
+  private commitGate: (() => Promise<void>) | null = null;
   private forcedTokenResponse: { status: number; body: unknown } | null = null;
   private breakUserFetch = false;
+  private forcedMrCreateConflict = false;
+  private breakMergeRequestList = false;
 
   static async start(): Promise<FakeGitlab> {
     const fake = new FakeGitlab();
@@ -139,8 +147,11 @@ export class FakeGitlab {
     this.requests = [];
     this.seq = 1;
     this.tokenGate = null;
+    this.commitGate = null;
     this.forcedTokenResponse = null;
     this.breakUserFetch = false;
+    this.forcedMrCreateConflict = false;
+    this.breakMergeRequestList = false;
   }
 
   /**
@@ -168,6 +179,33 @@ export class FakeGitlab {
   /** Makes the very next `GET /api/v4/user` request fail with a 500, to simulate a post-exchange failure. */
   breakNextUserFetch(): void {
     this.breakUserFetch = true;
+  }
+
+  /**
+   * Delays every subsequent `POST /repository/commits` response until the returned function is
+   * called — lets a test pause a commit mid-flight (e.g. to race a concurrent push against it)
+   * and then let it proceed with the request body already sent.
+   */
+  holdCommitRequests(): () => void {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.commitGate = () => gate;
+    return () => {
+      release();
+      this.commitGate = null;
+    };
+  }
+
+  /** Makes the very next `POST .../merge_requests` answer 409, as if another request won the race to create one. */
+  forceNextMergeRequestCreateConflict(): void {
+    this.forcedMrCreateConflict = true;
+  }
+
+  /** Makes the very next `GET .../merge_requests` request fail with a 500. */
+  breakNextMergeRequestList(): void {
+    this.breakMergeRequestList = true;
   }
 
   addUser(data: { username: string; name?: string; avatar_url?: string | null }): FakeUser {
@@ -257,6 +295,15 @@ export class FakeGitlab {
     const b = this.branch(projectId, branch)!;
     const commitId = sha();
     b.files.set(path, { content, lastCommitId: commitId });
+    b.commitId = commitId;
+    return commitId;
+  }
+
+  /** Like `setFile`, but for content that is deliberately not valid UTF-8 (raw bytes, not text). */
+  setBinaryFile(projectId: number, branch: string, path: string, bytes: Buffer): string {
+    const b = this.branch(projectId, branch)!;
+    const commitId = sha();
+    b.files.set(path, { content: bytes.toString('utf8'), bytes, lastCommitId: commitId });
     b.commitId = commitId;
     return commitId;
   }
@@ -448,6 +495,30 @@ export class FakeGitlab {
       res.json(all.slice((page - 1) * perPage, page * perPage));
     });
 
+    // Registered before the GET route below: Express treats a GET-only route as also matching
+    // HEAD (mirroring real HTTP semantics), so without this order a HEAD request would never
+    // reach this dedicated handler and would instead get the GET route's JSON body stripped of
+    // just its bytes, none of the X-Gitlab-* headers.
+    api.head('/projects/:id/repository/files/:filePath', (req, res) => {
+      const p = project(req, res);
+      if (!p) return;
+      const ref = String(req.query.ref ?? p.default_branch);
+      const branch = this.resolveRef(p, ref);
+      const path = String(req.params.filePath);
+      const file = branch?.files.get(path);
+      if (!branch || !file) {
+        res.status(404).end();
+        return;
+      }
+      const bytes = file.bytes ?? Buffer.from(file.content, 'utf8');
+      res.set({
+        'X-Gitlab-Size': String(bytes.length),
+        'X-Gitlab-Last-Commit-Id': file.lastCommitId,
+        'X-Gitlab-Blob-Id': sha(),
+      });
+      res.status(200).end();
+    });
+
     api.get('/projects/:id/repository/files/:filePath', (req, res) => {
       const p = project(req, res);
       if (!p) return;
@@ -459,12 +530,13 @@ export class FakeGitlab {
         res.status(404).json({ message: '404 File Not Found' });
         return;
       }
+      const bytes = file.bytes ?? Buffer.from(file.content, 'utf8');
       res.json({
         file_name: path.split('/').pop(),
         file_path: path,
-        size: Buffer.byteLength(file.content),
+        size: bytes.length,
         encoding: 'base64',
-        content: Buffer.from(file.content).toString('base64'),
+        content: bytes.toString('base64'),
         ref,
         blob_id: sha(),
         commit_id: branch.commitId,
@@ -490,7 +562,8 @@ export class FakeGitlab {
       res.json(this.branchJson(p, b));
     });
 
-    api.post('/projects/:id/repository/commits', (req, res) => {
+    api.post('/projects/:id/repository/commits', async (req, res) => {
+      if (this.commitGate) await this.commitGate();
       const p = project(req, res);
       if (!p) return;
       const body = req.body as {
@@ -533,6 +606,11 @@ export class FakeGitlab {
     api.get('/projects/:id/merge_requests', (req, res) => {
       const p = project(req, res);
       if (!p) return;
+      if (this.breakMergeRequestList) {
+        this.breakMergeRequestList = false;
+        res.status(500).json({ message: 'simulated failure' });
+        return;
+      }
       const source = req.query.source_branch === undefined ? undefined : String(req.query.source_branch);
       const state = String(req.query.state ?? 'all');
       res.json(
@@ -546,6 +624,26 @@ export class FakeGitlab {
       const p = project(req, res);
       if (!p) return;
       const b = req.body as { source_branch: string; target_branch: string; title: string; description?: string };
+      if (this.forcedMrCreateConflict) {
+        this.forcedMrCreateConflict = false;
+        // Simulate a concurrent request that already created the MR we were about to: plant it
+        // (if it's not there yet) so a caller that reacts to this 409 by re-listing finds it.
+        if (!this.mergeRequests.some((m) => m.project_id === p.id && m.source_branch === b.source_branch && m.state === 'opened')) {
+          const iid = this.mergeRequests.filter((m) => m.project_id === p.id).length + 1;
+          this.mergeRequests.push({
+            iid,
+            project_id: p.id,
+            source_branch: b.source_branch,
+            target_branch: b.target_branch,
+            title: b.title,
+            description: b.description ?? '',
+            state: 'opened',
+            web_url: `${p.web_url}/-/merge_requests/${iid}`,
+          });
+        }
+        res.status(409).json({ message: ['Another open merge request already exists for this source branch'] });
+        return;
+      }
       if (this.mergeRequests.some((m) => m.project_id === p.id && m.source_branch === b.source_branch && m.state === 'opened')) {
         res.status(409).json({ message: ['Another open merge request already exists for this source branch'] });
         return;

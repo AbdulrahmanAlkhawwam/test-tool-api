@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../../common/types/auth-user';
 import { GitlabEnabledGuard } from '../gitlab/gitlab-enabled.guard';
-import { AutomationService } from './automation.service';
+import { AutomationService, SaveFileResult } from './automation.service';
 import { FileQueryDto, RefQueryDto } from './dto/automation-query.dto';
 import { SaveFileDto } from './dto/save-file.dto';
 
@@ -30,7 +30,7 @@ export class AutomationController {
   }
 
   @Put('file')
-  saveFile(@Param('projectId', ParseUUIDPipe) projectId: string, @Body() dto: SaveFileDto, @CurrentUser() user: AuthUser) {
+  saveFile(@Param('projectId', ParseUUIDPipe) projectId: string, @Body() dto: SaveFileDto, @CurrentUser() user: AuthUser): Promise<SaveFileResult> {
     return this.automation.saveFile(projectId, dto, user);
   }
 }
