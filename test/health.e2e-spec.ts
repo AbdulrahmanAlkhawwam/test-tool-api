@@ -30,4 +30,14 @@ describe('Health (e2e)', () => {
       await proxied.app.close();
     }
   });
+
+  it('answers the standard JSON error shape (not Express’s HTML page) for a body over the size limit', async () => {
+    const res = await ctx
+      .http()
+      .post('/api/auth/login')
+      .send({ email: 'a@b.com', password: 'x'.repeat(3 * 1024 * 1024) });
+    expect(res.status).toBe(413);
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.body).toEqual({ statusCode: 413, error: 'Payload Too Large', message: 'Request body is too large' });
+  });
 });
