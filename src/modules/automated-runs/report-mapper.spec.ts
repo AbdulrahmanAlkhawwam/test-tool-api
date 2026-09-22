@@ -102,4 +102,42 @@ describe('mapTestReport', () => {
       ['TC-AUTH-002', ResultStatus.PASSED],
     ]);
   });
+
+  it('never throws on a non-string name/classname, and defaults an unresolvable file to an empty string', () => {
+    const bad = { status: 'success', name: null, classname: undefined, file: undefined, executionTime: 1, systemOutput: null, stackTrace: null } as unknown as GitlabTestCase;
+    const noNameSuite = (...cases: GitlabTestCase[]): GitlabTestSuite[] => [{ name: '', cases }];
+    expect(() => mapTestReport(noNameSuite(bad), CODES)).not.toThrow();
+    expect(mapTestReport(noNameSuite(bad), CODES).unlinked).toEqual([
+      { status: ResultStatus.PASSED, title: '', file: '', durationMs: 1000, errorMessage: null, errorStack: null },
+    ]);
+  });
+
+  it('clamps a negative, infinite or non-numeric execution time to a non-negative duration', () => {
+    const report = mapTestReport(
+      suites(
+        tc({ name: 'a', executionTime: -5 }),
+        tc({ name: 'b', executionTime: Infinity }),
+        tc({ name: 'c', executionTime: Number.NaN }),
+        tc({ name: 'd', executionTime: 'oops' as unknown as number }),
+      ),
+      CODES,
+    );
+    expect(report.unlinked.map((r) => r.durationMs)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('bounds a very long file path and an aggregated file list to 1000 characters', () => {
+    const longFile = 'e2e/'.repeat(400) + 'a.spec.ts';
+    const [single] = mapTestReport(suites(tc({ name: 'x @TC-AUTH-001', file: longFile })), CODES).linked;
+    expect(single.file!.length).toBe(1000);
+
+    const manyFiles = Array.from({ length: 30 }, (_, i) => tc({ name: `t${i} @TC-AUTH-002`, file: `e2e/module-${i}/very-long-descriptive-name-${i}.spec.ts` }));
+    const [aggregated] = mapTestReport(suites(...manyFiles), CODES).linked;
+    expect(aggregated.file!.length).toBeLessThanOrEqual(1000);
+  });
+
+  it('clamps an aggregated duration sum to fit a Postgres Int column', () => {
+    const manyLongTests = Array.from({ length: 5 }, (_, i) => tc({ name: `t${i} @TC-AUTH-001`, executionTime: 1_000_000 }));
+    const [aggregated] = mapTestReport(suites(...manyLongTests), CODES).linked;
+    expect(aggregated.durationMs).toBe(2_147_483_647);
+  });
 });

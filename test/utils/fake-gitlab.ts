@@ -109,7 +109,10 @@ export class FakeGitlab {
   private server?: Server;
   private tokenGate: (() => Promise<void>) | null = null;
   private commitGate: (() => Promise<void>) | null = null;
+  private pipelineCreateGate: (() => Promise<void>) | null = null;
+  private pipelineGetGate: (() => Promise<void>) | null = null;
   private forcedTokenResponse: { status: number; body: unknown } | null = null;
+  private forcedPipelineCreateResponse: { status: number; body: unknown } | null = null;
   private breakUserFetch = false;
   private forcedMrCreateConflict = false;
   private breakMergeRequestList = false;
@@ -148,7 +151,10 @@ export class FakeGitlab {
     this.seq = 1;
     this.tokenGate = null;
     this.commitGate = null;
+    this.pipelineCreateGate = null;
+    this.pipelineGetGate = null;
     this.forcedTokenResponse = null;
+    this.forcedPipelineCreateResponse = null;
     this.breakUserFetch = false;
     this.forcedMrCreateConflict = false;
     this.breakMergeRequestList = false;
@@ -201,6 +207,45 @@ export class FakeGitlab {
   /** Makes the very next `POST .../merge_requests` answer 409, as if another request won the race to create one. */
   forceNextMergeRequestCreateConflict(): void {
     this.forcedMrCreateConflict = true;
+  }
+
+  /**
+   * Delays every subsequent `POST .../pipeline` (create) response until the returned function is
+   * called. Combined with a short `GITLAB_REQUEST_TIMEOUT_MS`, this is how a genuine client-side
+   * timeout (GitlabHttpError status 0) is exercised: the request never completes on this end, so
+   * the client's own `AbortSignal.timeout` fires first.
+   */
+  holdPipelineCreateRequests(): () => void {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.pipelineCreateGate = () => gate;
+    return () => {
+      release();
+      this.pipelineCreateGate = null;
+    };
+  }
+
+  /** Makes the very next `POST .../pipeline` (create) answer with this status/body instead of normal processing. */
+  breakNextPipelineCreate(status: number, body: unknown): void {
+    this.forcedPipelineCreateResponse = { status, body };
+  }
+
+  /**
+   * Delays every subsequent `GET .../pipelines/:id` response until the returned function is
+   * called — lets a test hold a poll mid-flight (e.g. to exercise shutdown while a tick is running).
+   */
+  holdPipelineRequests(): () => void {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.pipelineGetGate = () => gate;
+    return () => {
+      release();
+      this.pipelineGetGate = null;
+    };
   }
 
   /** Makes the very next `GET .../merge_requests` request fail with a 500. */
@@ -677,7 +722,14 @@ export class FakeGitlab {
       res.json(mr);
     });
 
-    api.post('/projects/:id/pipeline', (req, res) => {
+    api.post('/projects/:id/pipeline', async (req, res) => {
+      if (this.pipelineCreateGate) await this.pipelineCreateGate();
+      if (this.forcedPipelineCreateResponse) {
+        const { status, body: forcedBody } = this.forcedPipelineCreateResponse;
+        this.forcedPipelineCreateResponse = null;
+        res.status(status).json(forcedBody);
+        return;
+      }
       const p = project(req, res);
       if (!p) return;
       const body = req.body as { ref: string; variables?: { key: string; value: string }[] };
@@ -708,7 +760,8 @@ export class FakeGitlab {
       res.status(201).json(this.pipelineJson(pipeline));
     });
 
-    api.get('/projects/:id/pipelines/:pipelineId', (req, res) => {
+    api.get('/projects/:id/pipelines/:pipelineId', async (req, res) => {
+      if (this.pipelineGetGate) await this.pipelineGetGate();
       const pipeline = pipelineOf(req, res);
       if (pipeline) res.json(this.pipelineJson(pipeline));
     });

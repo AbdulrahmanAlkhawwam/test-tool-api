@@ -14,7 +14,9 @@ describe('GitlabApiService (against the fake GitLab)', () => {
 
   beforeAll(async () => {
     fake = await FakeGitlab.start();
-    const config = { getOrThrow: () => ({ url: fake.url, clientId: 'test-client', clientSecret: 'test-secret', redirectUri: REDIRECT_URI }) };
+    const config = {
+      getOrThrow: () => ({ url: fake.url, clientId: 'test-client', clientSecret: 'test-secret', redirectUri: REDIRECT_URI, requestTimeoutMs: 5000 }),
+    };
     api = new GitlabApiService(config as unknown as ConfigService);
   });
   beforeEach(() => {
@@ -118,5 +120,46 @@ describe('GitlabApiService (against the fake GitLab)', () => {
       status: 400,
       message: 'The provided authorization grant is invalid',
     });
+  });
+
+  it('drops an unparseable finished_at instead of returning an invalid date', async () => {
+    fake.addProject({ id: 7, path: 'group/app', members: [user] });
+    const pipeline = await api.createPipeline(token, 7, 'main', {});
+    fake.finishPipeline(pipeline.id, 'success', null, 'not-a-real-date');
+    expect((await api.getPipeline(token, 7, pipeline.id)).finishedAt).toBeNull();
+
+    fake.finishPipeline(pipeline.id, 'success', null, '2026-09-18T10:00:00.000Z');
+    expect((await api.getPipeline(token, 7, pipeline.id)).finishedAt).toBe('2026-09-18T10:00:00.000Z');
+  });
+
+  it('coerces missing/non-string test-report fields instead of throwing, and clamps a bad execution time', async () => {
+    fake.addProject({ id: 7, path: 'group/app', members: [user] });
+    const pipeline = await api.createPipeline(token, 7, 'main', {});
+    fake.finishPipeline(pipeline.id, 'success', {
+      total_count: 1,
+      test_suites: [
+        {
+          name: undefined as unknown as string,
+          test_cases: [{ status: 'success', name: undefined, classname: null, file: 123, execution_time: -5 } as never],
+        },
+      ],
+    });
+
+    const [suite] = await api.getTestReport(token, 7, pipeline.id);
+    expect(suite.name).toBe('');
+    expect(suite.cases).toEqual([
+      { status: 'success', name: '', classname: '', file: null, executionTime: 0, systemOutput: null, stackTrace: null },
+    ]);
+  });
+
+  it('accepts a non-negative, finite execution time as-is', async () => {
+    fake.addProject({ id: 7, path: 'group/app', members: [user] });
+    const pipeline = await api.createPipeline(token, 7, 'main', {});
+    fake.finishPipeline(pipeline.id, 'success', {
+      total_count: 1,
+      test_suites: [{ name: 'chromium', test_cases: [{ status: 'success', name: 'a', classname: 'a', execution_time: 1.5 }] }],
+    });
+    const [suite] = await api.getTestReport(token, 7, pipeline.id);
+    expect(suite.cases[0].executionTime).toBe(1.5);
   });
 });

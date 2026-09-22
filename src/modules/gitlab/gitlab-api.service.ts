@@ -19,7 +19,6 @@ import {
   OAuthTokens,
 } from './gitlab.types';
 
-const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_TREE_PAGES = 50;
 const DEFAULT_TOKEN_TTL_SECONDS = 7200;
 
@@ -82,7 +81,19 @@ const toMergeRequest = (m: RawMergeRequest): GitlabMergeRequest => ({
   sourceBranch: m.source_branch,
   webUrl: m.web_url,
 });
-const toPipeline = (p: RawPipeline): GitlabPipeline => ({ id: p.id, status: p.status, ref: p.ref, webUrl: p.web_url, finishedAt: p.finished_at ?? null });
+/** `finished_at` kept only if it's actually a parseable date; GitLab (or a bad fixture) sending garbage must never produce an Invalid Date downstream. */
+function validFinishedAt(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string' || !raw) return null;
+  return Number.isNaN(new Date(raw).getTime()) ? null : raw;
+}
+
+const toPipeline = (p: RawPipeline): GitlabPipeline => ({ id: p.id, status: p.status, ref: p.ref, webUrl: p.web_url, finishedAt: validFinishedAt(p.finished_at) });
+
+/** A finite, non-negative number of seconds; anything else (missing, negative, NaN, Infinity, non-numeric) becomes 0. */
+function safeExecutionTime(raw: number | null | undefined): number {
+  const value = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
 
 /** Whether `bytes` decode as strict UTF-8 (a lossy decode never throws, so this needs its own check). */
 function isValidUtf8(bytes: Buffer): boolean {
@@ -277,13 +288,13 @@ export class GitlabApiService {
       `/projects/${projectId}/pipelines/${pipelineId}/test_report`,
     );
     return (report.test_suites ?? []).map((s) => ({
-      name: s.name,
+      name: typeof s.name === 'string' ? s.name : '',
       cases: (s.test_cases ?? []).map((c) => ({
         status: c.status,
-        name: c.name,
-        classname: c.classname ?? '',
-        file: c.file ?? null,
-        executionTime: c.execution_time ?? 0,
+        name: typeof c.name === 'string' ? c.name : '',
+        classname: typeof c.classname === 'string' ? c.classname : '',
+        file: typeof c.file === 'string' ? c.file : null,
+        executionTime: safeExecutionTime(c.execution_time),
         systemOutput: c.system_output ?? null,
         stackTrace: c.stack_trace ?? null,
       })),
@@ -345,7 +356,7 @@ export class GitlabApiService {
   private async execute<T>(url: URL, init: RequestInit): Promise<{ data: T; headers: Headers }> {
     let res: Response;
     try {
-      res = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      res = await fetch(url, { ...init, signal: AbortSignal.timeout(this.cfg.requestTimeoutMs) });
     } catch (e) {
       throw new GitlabHttpError(0, `GitLab is unreachable (${(e as Error).message})`);
     }

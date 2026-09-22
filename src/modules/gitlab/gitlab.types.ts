@@ -100,5 +100,8 @@ export interface OAuthTokens {
   expiresAt: Date;
 }
 
-/** Pipeline statuses after which GitLab will not run anything else. */
+/** Pipeline (and job) statuses after which GitLab will not run anything else. */
 export const FINAL_PIPELINE_STATUSES: ReadonlySet<string> = new Set(['success', 'failed', 'canceled', 'skipped']);
+
+/** The CI job name the tests-repo snippet gives the Playwright job; used to find its test report/artifacts. */
+export const EJAD_PLAYWRIGHT_JOB_NAME = 'ejad-playwright';

@@ -9,7 +9,9 @@
  * failure is what this function rejects with.
  */
 export async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  if (limit < 1) throw new Error('mapWithConcurrency: limit must be at least 1');
+  // `!(limit >= 1)` (rather than `limit < 1`) also catches NaN: `NaN < 1` is false, which would
+  // silently spawn zero workers and return an array of holes instead of rejecting.
+  if (!(limit >= 1)) throw new Error('mapWithConcurrency: limit must be at least 1');
   const results: R[] = new Array(items.length);
   let next = 0;
   let failed = false;

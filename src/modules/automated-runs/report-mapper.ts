@@ -4,6 +4,19 @@ import { GitlabTestCase, GitlabTestSuite } from '../gitlab/gitlab.types';
 
 export const MAX_ERROR_LENGTH = 10_000;
 const MAX_TITLE_LENGTH = 1000;
+const MAX_FILE_LENGTH = 1000;
+/** Postgres int4 max: durationMs is stored as a plain Int column. */
+const MAX_DURATION_MS = 2_147_483_647;
+
+/** GitLab's report is untrusted input: a non-string field must never throw, just fall back to ''. */
+const safeString = (value: unknown): string => (typeof value === 'string' ? value : '');
+
+/** A finite, non-negative duration in whole milliseconds, clamped to fit an Int column. */
+function safeDurationMs(executionTimeSeconds: unknown): number {
+  const seconds = typeof executionTimeSeconds === 'number' ? executionTimeSeconds : Number(executionTimeSeconds);
+  if (!Number.isFinite(seconds) || seconds < 0) return 0;
+  return Math.min(MAX_DURATION_MS, Math.round(seconds * 1000));
+}
 
 export interface MappedResult {
   status: ResultStatus;
@@ -39,11 +52,14 @@ export function mapTestStatus(status: string): ResultStatus {
 function mapCase(testCase: GitlabTestCase, suite: GitlabTestSuite): MappedResult {
   const status = mapTestStatus(testCase.status);
   const failed = status === ResultStatus.FAILED;
+  const name = safeString(testCase.name);
+  const classname = safeString(testCase.classname);
+  const file = testCase.file ?? (classname || safeString(suite.name) || '');
   return {
     status,
-    title: truncate(testCase.name, MAX_TITLE_LENGTH)!,
-    file: testCase.file ?? (testCase.classname || suite.name || null),
-    durationMs: Math.round(testCase.executionTime * 1000),
+    title: truncate(name, MAX_TITLE_LENGTH)!,
+    file: truncate(file, MAX_FILE_LENGTH)!,
+    durationMs: safeDurationMs(testCase.executionTime),
     errorMessage: failed ? truncate(testCase.systemOutput ?? testCase.stackTrace ?? 'Test failed', MAX_ERROR_LENGTH) : null,
     errorStack: failed ? truncate(testCase.stackTrace, MAX_ERROR_LENGTH) : null,
   };
@@ -69,8 +85,8 @@ function aggregate(testCaseId: string, code: string, tests: MappedResult[]): Lin
     code,
     status,
     title: truncate(tests.map((t) => t.title).join(' | '), MAX_TITLE_LENGTH)!,
-    file: files.length ? files.join(', ') : null,
-    durationMs: tests.reduce((sum, t) => sum + t.durationMs, 0),
+    file: files.length ? truncate(files.join(', '), MAX_FILE_LENGTH) : null,
+    durationMs: Math.min(MAX_DURATION_MS, tests.reduce((sum, t) => sum + t.durationMs, 0)),
     errorMessage,
     errorStack: failed[0]?.errorStack ?? null,
   };
@@ -89,7 +105,7 @@ export function mapTestReport(
   for (const suite of suites) {
     for (const testCase of suite.cases) {
       const mapped = mapCase(testCase, suite);
-      const codes = extractCaseTags(testCase.name).filter((code) => caseIdsByCode.has(code));
+      const codes = extractCaseTags(safeString(testCase.name)).filter((code) => caseIdsByCode.has(code));
       if (!codes.length) {
         unlinked.push(mapped);
         continue;

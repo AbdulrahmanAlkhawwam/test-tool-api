@@ -1,14 +1,12 @@
-import { HttpException, Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
+import { HttpException, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GitlabConnectionState, RunStatus, RunType } from '@prisma/client';
 import { GitlabConfig } from '../../config/configuration';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GitlabApiService } from '../gitlab/gitlab-api.service';
 import { GitlabConnectionService } from '../gitlab/gitlab-connection.service';
-import { FINAL_PIPELINE_STATUSES } from '../gitlab/gitlab.types';
+import { EJAD_PLAYWRIGHT_JOB_NAME, FINAL_PIPELINE_STATUSES, GitlabPipeline } from '../gitlab/gitlab.types';
 import { ResultImporterService } from './result-importer.service';
-
-export const PIPELINE_POLLER = 'gitlab-pipeline-poller';
 
 /**
  * How long an AUTOMATED run may sit IN_PROGRESS with no pipelineId before the sweep gives up on
@@ -27,14 +25,23 @@ interface PolledRun {
 
 /**
  * Polls GitLab for every unfinished automated run's pipeline, on a plain `setInterval` (no
- * `@nestjs/schedule`: one timer, started on bootstrap and always cleared on shutdown, is all this
- * needs). `pollOnce` is exported for tests to call directly instead of waiting on the timer.
+ * `@nestjs/schedule`: one timer, started on bootstrap and always cleared on module destroy, is all
+ * this needs). `pollOnce` is exported for tests to call directly instead of waiting on the timer.
+ *
+ * The interval is cleared, and any in-flight pass awaited, in `onModuleDestroy` rather than
+ * `onApplicationShutdown` — Nest runs every `onModuleDestroy` (including `PrismaService`'s, which
+ * disconnects the pool) *before* any `onApplicationShutdown`, and destroy hooks run in the reverse
+ * of module-initialization order, so this module's hook naturally runs before Prisma's as long as
+ * it stays an `onModuleDestroy`. That ordering is what keeps a query from ever running on an
+ * already-closed pool during shutdown.
  */
 @Injectable()
-export class PipelinePollerService implements OnApplicationBootstrap, OnApplicationShutdown {
+export class PipelinePollerService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(PipelinePollerService.name);
   private running = false;
   private interval: NodeJS.Timeout | null = null;
+  /** The currently in-flight `pollOnce()` call, if any; `onModuleDestroy` awaits this before letting shutdown continue. */
+  private currentPoll: Promise<void> | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -53,11 +60,12 @@ export class PipelinePollerService implements OnApplicationBootstrap, OnApplicat
     this.interval = setInterval(() => void this.pollOnce(), this.cfg.pollIntervalMs);
   }
 
-  onApplicationShutdown(): void {
+  async onModuleDestroy(): Promise<void> {
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
     }
+    if (this.currentPoll) await this.currentPoll;
   }
 
   /** Whether the polling interval is currently running (tests only). */
@@ -65,10 +73,25 @@ export class PipelinePollerService implements OnApplicationBootstrap, OnApplicat
     return this.interval !== null;
   }
 
-  /** One pass over all unfinished automated runs (the interval calls this; tests call it directly). */
+  /**
+   * One pass over all unfinished automated runs (the interval calls this; tests call it directly).
+   * Never rejects: a DB/GitLab problem here is logged and retried on the next pass rather than left
+   * to become an unhandled rejection (the interval calls this with `void`, so nothing else observes
+   * its result).
+   */
   async pollOnce(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    this.currentPoll = this.runOnePass();
+    try {
+      await this.currentPoll;
+    } finally {
+      this.running = false;
+      this.currentPoll = null;
+    }
+  }
+
+  private async runOnePass(): Promise<void> {
     try {
       const runs: PolledRun[] = await this.prisma.testRun.findMany({
         where: { type: RunType.AUTOMATED, status: RunStatus.IN_PROGRESS },
@@ -86,14 +109,19 @@ export class PipelinePollerService implements OnApplicationBootstrap, OnApplicat
         try {
           await this.pollRun(run);
         } catch (e) {
-          // Per-user GitLab problems (reconnect needed, 403/404, GitLab down) are retried on the next pass.
-          if (!(e instanceof HttpException)) {
+          // Per-user GitLab problems (reconnect needed, 403/other 4xx, GitLab down) are retried on
+          // the next pass; a one-line warning is enough, they're expected occasionally.
+          if (e instanceof HttpException) {
+            this.logger.warn(`Polling run ${run.id}: ${e.message}`);
+          } else {
             this.logger.error(`Polling run ${run.id} failed: ${e instanceof Error ? e.stack : String(e)}`);
           }
         }
       }
-    } finally {
-      this.running = false;
+    } catch (e) {
+      // The run query itself failed (e.g. a DB blip) — never let this escape as an unhandled
+      // rejection; just log and let the next pass try again.
+      this.logger.warn(`Pipeline poll failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -106,10 +134,6 @@ export class PipelinePollerService implements OnApplicationBootstrap, OnApplicat
       }
       return;
     }
-    if (Date.now() - run.startedAt.getTime() > this.cfg.runTimeoutMs) {
-      await this.importer.close(run.id, 'Timed out waiting for GitLab');
-      return;
-    }
     const gitlabProjectId = run.project.gitlabProjectId;
     const userId = run.triggeredById;
     if (userId === null || gitlabProjectId === null) {
@@ -118,15 +142,43 @@ export class PipelinePollerService implements OnApplicationBootstrap, OnApplicat
     }
     const pipelineId = run.pipelineId;
     const connection = await this.prisma.gitlabConnection.findUnique({ where: { userId }, select: { state: true } });
-    if (connection?.state !== GitlabConnectionState.ACTIVE) return; // paused until the user reconnects
+    if (connection?.state !== GitlabConnectionState.ACTIVE) return; // paused until the user reconnects, or there is no connection at all
 
-    const pipeline = await this.gitlab.withToken(userId, (token) => this.api.getPipeline(token, gitlabProjectId, pipelineId));
-    if (!FINAL_PIPELINE_STATUSES.has(pipeline.status)) {
+    // Always ask GitLab first, even past the run timeout: a pipeline that already finished must be
+    // imported, not discarded as timed out just because the poll happened to lag behind it.
+    let pipeline: GitlabPipeline;
+    try {
+      pipeline = await this.gitlab.withToken(userId, (token) => this.api.getPipeline(token, gitlabProjectId, pipelineId));
+    } catch (e) {
+      if (e instanceof HttpException && e.getStatus() === 404) {
+        await this.importer.close(run.id, 'The pipeline no longer exists in GitLab');
+        return;
+      }
+      throw e;
+    }
+
+    if (!(await this.isFinal(userId, gitlabProjectId, pipeline))) {
+      if (Date.now() - run.startedAt.getTime() > this.cfg.runTimeoutMs) {
+        await this.importer.close(run.id, 'Timed out waiting for GitLab');
+        return;
+      }
       if (pipeline.status !== run.pipelineStatus) {
         await this.prisma.testRun.update({ where: { id: run.id }, data: { pipelineStatus: pipeline.status }, select: { id: true } });
       }
       return;
     }
     await this.gitlab.withToken(userId, (token) => this.importer.importPipeline(token, run.id, pipeline));
+  }
+
+  /**
+   * Whether the pipeline is done. A trailing manual/blocked gate job (e.g. a deploy step) can leave
+   * the pipeline itself not-yet-final even though the test job has already finished, so the
+   * ejad-playwright job's own status is checked too — the run's tests are done either way.
+   */
+  private async isFinal(userId: string, gitlabProjectId: number, pipeline: GitlabPipeline): Promise<boolean> {
+    if (FINAL_PIPELINE_STATUSES.has(pipeline.status)) return true;
+    const jobs = await this.gitlab.withToken(userId, (token) => this.api.listPipelineJobs(token, gitlabProjectId, pipeline.id));
+    const job = jobs.find((j) => j.name === EJAD_PLAYWRIGHT_JOB_NAME) ?? jobs[0];
+    return !!job && FINAL_PIPELINE_STATUSES.has(job.status);
   }
 }

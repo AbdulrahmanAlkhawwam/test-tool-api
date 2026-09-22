@@ -1,7 +1,8 @@
+import { Logger } from '@nestjs/common';
 import { FakeGitlab, FakeUser } from './utils/fake-gitlab';
 import { seedActors, seedCase, seedModule } from './utils/factories';
 import { createGitlabTestApp, GITLAB_PROJECT_ID as P, seedGitlabConnection, seedLinkedProject } from './utils/gitlab';
-import { resetDb, TestContext } from './utils/test-app';
+import { createTestApp, resetDb, TestContext } from './utils/test-app';
 
 describe('Automated runs (e2e)', () => {
   let ctx: TestContext;
@@ -126,6 +127,54 @@ describe('Automated runs (e2e)', () => {
     expect(run.note).toMatch(/^GitLab could not start the pipeline: /);
     const conn = await ctx.prisma.gitlabConnection.findUniqueOrThrow({ where: { userId: actors.tester.id } });
     expect(conn.state).toBe('NEEDS_RECONNECT');
+  });
+
+  it("notes that GitLab may still have started the pipeline on a 5xx from createPipeline", async () => {
+    fake.breakNextPipelineCreate(503, { message: 'Undergoing maintenance' });
+    const res = await trigger({ branch: 'main', scope: { mode: 'ALL' } }).expect(201);
+    expect(res.body).toMatchObject({
+      status: 'COMPLETED',
+      pipelineId: null,
+      note: "GitLab didn't confirm the pipeline (Undergoing maintenance) – it may still have started; check GitLab",
+    });
+  });
+
+  it("notes that GitLab may still have started the pipeline when createPipeline times out (status 0)", async () => {
+    const release = fake.holdPipelineCreateRequests();
+    const shortTimeout = await createTestApp({ GITLAB_URL: fake.url, GITLAB_REQUEST_TIMEOUT_MS: '50' });
+    try {
+      const res = await shortTimeout
+        .http()
+        .post(`/api/projects/${projectId}/runs/automated`)
+        .set(actors.testerAuth)
+        .send({ branch: 'main', scope: { mode: 'ALL' } });
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('COMPLETED');
+      expect(res.body.pipelineId).toBeNull();
+      expect(res.body.note).toMatch(/^GitLab didn't confirm the pipeline \(GitLab is unreachable/);
+      expect(res.body.note).toMatch(/it may still have started; check GitLab$/);
+    } finally {
+      release();
+      await shortTimeout.app.close();
+    }
+  });
+
+  it('retries the pipeline-id save once and keeps the run IN_PROGRESS once it recovers', async () => {
+    const errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const updateSpy = jest
+      .spyOn(ctx.prisma.testRun, 'update')
+      .mockImplementationOnce(() => Promise.reject(new Error('connection reset')) as never);
+    try {
+      const res = await trigger({ branch: 'main', scope: { mode: 'ALL' } }).expect(201);
+      expect(res.body.status).toBe('IN_PROGRESS');
+      expect(res.body.pipelineId).not.toBeNull();
+      expect(res.body.pipelineWebUrl).not.toBeNull();
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('connection reset'));
+      expect(updateSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      updateSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
   });
 
   it('requires a GitLab connection before creating a run', async () => {

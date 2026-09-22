@@ -55,8 +55,10 @@ describe('mapWithConcurrency', () => {
     expect(started).toEqual([1, 2]);
   });
 
-  it('rejects a limit below 1', async () => {
+  it('rejects a limit below 1, or a NaN limit', async () => {
     await expect(mapWithConcurrency([1, 2], 0, async (item) => item)).rejects.toThrow('mapWithConcurrency: limit must be at least 1');
     await expect(mapWithConcurrency([1, 2], -1, async (item) => item)).rejects.toThrow('mapWithConcurrency: limit must be at least 1');
+    // NaN < 1 is false, so a naive `limit < 1` guard would miss this and silently return holes.
+    await expect(mapWithConcurrency([1, 2], Number.NaN, async (item) => item)).rejects.toThrow('mapWithConcurrency: limit must be at least 1');
   });
 });

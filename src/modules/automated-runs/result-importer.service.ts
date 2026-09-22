@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ResultStatus, RunStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GitlabApiService } from '../gitlab/gitlab-api.service';
-import { GitlabPipeline } from '../gitlab/gitlab.types';
+import { EJAD_PLAYWRIGHT_JOB_NAME, GitlabPipeline } from '../gitlab/gitlab.types';
 import { mapTestReport, MappedResult } from './report-mapper';
 
 export const NO_TEST_FOUND_NOTE = 'No automated test found';
@@ -35,7 +35,7 @@ export class ResultImporterService {
     }
     const suites = await this.api.getTestReport(token, gitlabProjectId, pipeline.id);
     const jobs = await this.api.listPipelineJobs(token, gitlabProjectId, pipeline.id);
-    const job = jobs.find((j) => j.name === 'ejad-playwright') ?? jobs[0];
+    const job = jobs.find((j) => j.name === EJAD_PLAYWRIGHT_JOB_NAME) ?? jobs[0];
     if (!suites.some((s) => s.cases.length)) {
       await this.close(runId, `Pipeline finished without a test report – ${job?.webUrl ?? pipeline.webUrl}`, pipeline.status);
       return;

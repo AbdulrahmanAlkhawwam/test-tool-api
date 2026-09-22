@@ -32,6 +32,7 @@ describe('parseGitlabConfig', () => {
       webUrl: 'http://localhost:3001',
       pollIntervalMs: 20_000,
       runTimeoutMs: 7_200_000,
+      requestTimeoutMs: 15_000,
     });
   });
 
@@ -45,6 +46,7 @@ describe('parseGitlabConfig', () => {
       WEB_URL: 'https://tests.ejad.net/',
       GITLAB_POLL_INTERVAL_MS: '5000',
       GITLAB_RUN_TIMEOUT_MINUTES: '30',
+      GITLAB_REQUEST_TIMEOUT_MS: '5000',
     });
     expect(config).toMatchObject({
       enabled: true,
@@ -52,6 +54,7 @@ describe('parseGitlabConfig', () => {
       webUrl: 'https://tests.ejad.net',
       pollIntervalMs: 5000,
       runTimeoutMs: 1_800_000,
+      requestTimeoutMs: 5000,
     });
   });
 
@@ -72,6 +75,22 @@ describe('parseGitlabConfig', () => {
     expect(parseGitlabConfig({ ...base, GITLAB_RUN_TIMEOUT_MINUTES: 'abc' })).toMatchObject({ runTimeoutMs: 7_200_000 });
     expect(parseGitlabConfig({ ...base, GITLAB_RUN_TIMEOUT_MINUTES: '-30' })).toMatchObject({ runTimeoutMs: 7_200_000 });
     expect(parseGitlabConfig({ ...base, GITLAB_RUN_TIMEOUT_MINUTES: '30' })).toMatchObject({ runTimeoutMs: 1_800_000 });
+  });
+
+  it('bounds the poll interval to [1s, 1h] (0 is still always "off")', () => {
+    const base = {
+      GITLAB_URL: 'https://git.ejad.net',
+      GITLAB_OAUTH_CLIENT_ID: 'id',
+      GITLAB_OAUTH_CLIENT_SECRET: 'secret',
+      GITLAB_OAUTH_REDIRECT_URI: 'https://api.test/cb',
+      TOKEN_ENCRYPTION_KEY: KEY,
+    };
+    expect(parseGitlabConfig({ ...base, GITLAB_POLL_INTERVAL_MS: '0' })).toMatchObject({ pollIntervalMs: 0 });
+    expect(parseGitlabConfig({ ...base, GITLAB_POLL_INTERVAL_MS: '1000' })).toMatchObject({ pollIntervalMs: 1000 });
+    expect(parseGitlabConfig({ ...base, GITLAB_POLL_INTERVAL_MS: '3600000' })).toMatchObject({ pollIntervalMs: 3_600_000 });
+    // Below the minimum, above the maximum: both fall back to the default, not clamp to the bound.
+    expect(parseGitlabConfig({ ...base, GITLAB_POLL_INTERVAL_MS: '500' })).toMatchObject({ pollIntervalMs: 20_000 });
+    expect(parseGitlabConfig({ ...base, GITLAB_POLL_INTERVAL_MS: '3600001' })).toMatchObject({ pollIntervalMs: 20_000 });
   });
 
   it('fails fast on missing OAuth settings or a bad encryption key', () => {

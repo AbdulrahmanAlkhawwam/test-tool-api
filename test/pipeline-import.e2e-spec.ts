@@ -1,7 +1,8 @@
+import { Logger } from '@nestjs/common';
 import { PipelinePollerService } from '../src/modules/automated-runs/pipeline-poller.service';
 import { FakeGitlab, FakeTestReport } from './utils/fake-gitlab';
 import { seedActors, seedCase, seedModule } from './utils/factories';
-import { createGitlabTestApp, seedGitlabConnection, seedLinkedProject } from './utils/gitlab';
+import { createGitlabTestApp, seedGitlabConnection, seedLinkedProject, waitForRequests } from './utils/gitlab';
 import { createTestApp, resetDb, TestContext } from './utils/test-app';
 
 const REPORT: FakeTestReport = {
@@ -153,10 +154,30 @@ describe('Pipeline polling and result import (e2e)', () => {
 
   it('times out runs that GitLab never finishes', async () => {
     const run = await trigger({ mode: 'ALL' });
+    fake.setPipelineStatus(run.pipelineId, 'running');
     await ctx.prisma.testRun.update({ where: { id: run.id }, data: { startedAt: new Date(Date.now() - 3 * 3_600_000) } });
     await poll();
     expect(await detail(run.id)).toMatchObject({ status: 'COMPLETED', note: 'Timed out waiting for GitLab' });
-    expect(fake.requestsTo(`/pipelines/${run.pipelineId}`, 'GET')).toHaveLength(0);
+    // The pipeline is fetched even past the timeout (so a finished one is still imported); it's
+    // only actually treated as timed out once GitLab confirms it is still not final.
+    expect(fake.requestsTo(`/pipelines/${run.pipelineId}`, 'GET').length).toBeGreaterThan(0);
+  });
+
+  it('imports a pipeline that already finished, even past the run timeout', async () => {
+    const run = await trigger({ mode: 'ALL' });
+    fake.finishPipeline(run.pipelineId, 'success', REPORT);
+    await ctx.prisma.testRun.update({ where: { id: run.id }, data: { startedAt: new Date(Date.now() - 3 * 3_600_000) } });
+    await poll();
+    const body = await detail(run.id);
+    expect(body).toMatchObject({ status: 'COMPLETED', pipelineStatus: 'success' });
+    expect(body.note).toBeNull();
+  });
+
+  it('closes the run when GitLab no longer has the pipeline', async () => {
+    const run = await trigger({ mode: 'ALL' });
+    fake.pipelines = fake.pipelines.filter((p) => p.id !== run.pipelineId);
+    await poll();
+    expect(await detail(run.id)).toMatchObject({ status: 'COMPLETED', note: 'The pipeline no longer exists in GitLab' });
   });
 
   it('closes a run stuck with no pipeline id after a couple of minutes, but gives it a grace period first', async () => {
@@ -192,6 +213,34 @@ describe('Pipeline polling and result import (e2e)', () => {
     await ctx.prisma.gitlabConnection.update({ where: { userId: actors.tester.id }, data: { state: 'ACTIVE' } });
     await poll();
     expect((await detail(run.id)).status).toBe('COMPLETED');
+  });
+
+  it('closing the app while a poll is in flight waits for it, without logging an error', async () => {
+    const run = await trigger({ mode: 'ALL' });
+    const release = fake.holdPipelineRequests();
+    const second = await createTestApp({ GITLAB_URL: fake.url });
+    const errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const pollPromise = second.app.get(PipelinePollerService).pollOnce();
+      await waitForRequests(fake, `/pipelines/${run.pipelineId}`, 1);
+
+      let closed = false;
+      const closePromise = second.app.close().then(() => {
+        closed = true;
+      });
+      // Give close() a chance to run: it must still be waiting on the in-flight poll.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(closed).toBe(false);
+
+      release();
+      await Promise.all([pollPromise, closePromise]);
+      expect(closed).toBe(true);
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      release();
+      errorSpy.mockRestore();
+      await second.app.close().catch(() => {});
+    }
   });
 
   it('runs the polling interval only when it is enabled, and stops it cleanly on shutdown', async () => {

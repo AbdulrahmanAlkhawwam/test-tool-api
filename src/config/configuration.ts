@@ -32,21 +32,40 @@ export interface GitlabConfig {
   pollIntervalMs: number;
   /** Automated runs still unfinished after this long are closed. */
   runTimeoutMs: number;
+  /** Per-request timeout for calls to GitLab's API (tests lower this to exercise a real timeout fast). */
+  requestTimeoutMs: number;
 }
 
 const stripSlash = (value: string) => value.trim().replace(/\/+$/, '');
 
 /**
  * Parses a non-negative integer from an env var, falling back to `fallback` when the value is
- * missing, not a number, or negative. `zeroMeans`, when given, is what `0` itself means (e.g. the
- * poll interval's "off" switch) so a caller can tell that apart from an unparsable value; without
- * it, `0` also falls back to `fallback` (there is no meaningful "off" for a timeout).
+ * missing, not a number, or negative. `allowZero`, when true, lets `0` itself through (e.g. the
+ * poll interval's "off" switch); without it, `0` also falls back to `fallback` (there is no
+ * meaningful "off" for a timeout).
  */
 function parseNonNegativeInt(raw: string | undefined, fallback: number, allowZero = false): number {
   if (raw === undefined) return fallback;
   const value = parseInt(raw, 10);
   if (!Number.isFinite(value) || value < 0) return fallback;
   if (value === 0 && !allowZero) return fallback;
+  return value;
+}
+
+const POLL_INTERVAL_MIN_MS = 1_000;
+const POLL_INTERVAL_MAX_MS = 3_600_000;
+
+/**
+ * GITLAB_POLL_INTERVAL_MS: `0` always means "off" (tests rely on this). Any other value must fall
+ * within [1s, 1h] or it falls back to `fallback` — too low would hammer GitLab, too high would
+ * leave a stuck run unnoticed for a long time.
+ */
+function parsePollIntervalMs(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const value = parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 0) return fallback;
+  if (value === 0) return 0;
+  if (value < POLL_INTERVAL_MIN_MS || value > POLL_INTERVAL_MAX_MS) return fallback;
   return value;
 }
 
@@ -60,9 +79,9 @@ export function parseGitlabConfig(env: NodeJS.ProcessEnv): GitlabConfig {
     redirectUri: env.GITLAB_OAUTH_REDIRECT_URI ?? '',
     tokenEncryptionKey: env.TOKEN_ENCRYPTION_KEY ?? '',
     webUrl: stripSlash(env.WEB_URL ?? 'http://localhost:3001'),
-    // 0 is a meaningful, valid value here: it turns the pipeline poller off (tests rely on this).
-    pollIntervalMs: parseNonNegativeInt(env.GITLAB_POLL_INTERVAL_MS, 20_000, true),
+    pollIntervalMs: parsePollIntervalMs(env.GITLAB_POLL_INTERVAL_MS, 20_000),
     runTimeoutMs: parseNonNegativeInt(env.GITLAB_RUN_TIMEOUT_MINUTES, 120) * 60_000,
+    requestTimeoutMs: parseNonNegativeInt(env.GITLAB_REQUEST_TIMEOUT_MS, 15_000),
   };
   if (config.enabled) {
     const missing = (
