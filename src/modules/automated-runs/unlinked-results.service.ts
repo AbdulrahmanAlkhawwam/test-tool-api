@@ -33,14 +33,15 @@ export class UnlinkedResultsService {
     const name = dto.name ?? suggestCaseName(result.title);
     if (!name) throw new BadRequestException('name is required for results without a title');
     const notes = result.title ? `Created from automated test "${result.title}"${result.file ? ` in ${result.file}` : ''}` : undefined;
-    const testCase = await this.testCases.create(result.run.projectId, { moduleId: dto.moduleId, name, priority: dto.priority, notes }, user);
 
-    // Link only if nobody linked it meanwhile; otherwise retire the case we just created.
-    const linked = await this.prisma.testResult.updateMany({ where: { id: resultId, testCaseId: null }, data: { testCaseId: testCase.id } });
-    if (linked.count !== 1) {
-      await this.prisma.testCase.update({ where: { id: testCase.id }, data: { deletedAt: new Date() }, select: { id: true } });
-      throw new ConflictException(ALREADY_LINKED);
-    }
-    return { testCase, resultId, tag: `@${testCase.code}` };
+    // Create the case and link the result in one transaction: if the result got linked to another
+    // case in the meantime, throwing here rolls the whole transaction back — including the case
+    // insert — rather than leaving an orphaned (soft-deleted) case behind.
+    return this.prisma.$transaction(async (tx) => {
+      const testCase = await this.testCases.create(result.run.projectId, { moduleId: dto.moduleId, name, priority: dto.priority, notes }, user, tx);
+      const linked = await tx.testResult.updateMany({ where: { id: resultId, testCaseId: null }, data: { testCaseId: testCase.id } });
+      if (linked.count !== 1) throw new ConflictException(ALREADY_LINKED);
+      return { testCase, resultId, tag: `@${testCase.code}` };
+    });
   }
 }

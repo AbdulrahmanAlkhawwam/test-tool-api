@@ -48,6 +48,7 @@ describe('GitLab disabled (e2e)', () => {
     await expectHidden('get', `${base}/tree`);
     await expectHidden('get', `${base}/file?path=e2e/a.spec.ts`);
     await expectHidden('put', `${base}/file`, { path: 'e2e/a.spec.ts', content: 'x', branchSlug: 'x' });
+    await expectHidden('get', `${base}/coverage`);
   });
 
   it('hides the automated run trigger', async () => {

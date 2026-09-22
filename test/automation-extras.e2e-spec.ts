@@ -92,4 +92,30 @@ describe('Automation extras (e2e)', () => {
     expect(wrongModule.body.message).toBe('moduleId does not belong to this project');
     expect((await ctx.prisma.testResult.findUniqueOrThrow({ where: { id: result.id } })).testCaseId).toBeNull();
   });
+
+  it('requires an explicit name for a result with no usable title', async () => {
+    const result = await unlinked('@TC-OLD-001', null);
+    const res = await createCase(result.id, { moduleId }).expect(400);
+    expect(res.body.message).toBe('name is required for results without a title');
+    expect((await ctx.prisma.testResult.findUniqueOrThrow({ where: { id: result.id } })).testCaseId).toBeNull();
+  });
+
+  it('rolls back the case it just created (does not leave it soft-deleted) when it loses the race to link the result', async () => {
+    const result = await unlinked('cart/cart.spec.ts › adds an item to the cart');
+    const otherModule = await seedModule(ctx.prisma, projectId, { code: 'PAY', name: 'Payments' });
+    const casesBefore = await ctx.prisma.testCase.count({ where: { projectId } });
+
+    // Two requests race to create a case for the *same* result, each in a different module so the
+    // race is only over which one gets to link the result — not over allocating the same case code.
+    const [respA, respB] = await Promise.all([createCase(result.id, { moduleId }), createCase(result.id, { moduleId: otherModule.id })]);
+    const [winner, loser] = respA.status === 201 ? [respA, respB] : [respB, respA];
+    expect(winner.status).toBe(201);
+    expect(loser.status).toBe(409);
+    expect(loser.body.message).toBe('This result is already linked to a test case');
+
+    expect((await ctx.prisma.testResult.findUniqueOrThrow({ where: { id: result.id } })).testCaseId).toBe(winner.body.testCase.id);
+    // Exactly one case was created in total: the loser's insert was rolled back with its
+    // transaction, not left behind as an orphaned (soft-deleted) row.
+    expect(await ctx.prisma.testCase.count({ where: { projectId } })).toBe(casesBefore + 1);
+  });
 });
