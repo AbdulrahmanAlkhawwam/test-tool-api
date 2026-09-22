@@ -14,6 +14,9 @@ import { ResultImporterService } from './result-importer.service';
  */
 const STUCK_RUN_GRACE_MS = 2 * 60_000;
 
+/** The note a run is closed with once it's past `runTimeoutMs` and still not final. */
+const TIMED_OUT_NOTE = 'Timed out waiting for GitLab';
+
 interface PolledRun {
   id: string;
   startedAt: Date;
@@ -141,11 +144,22 @@ export class PipelinePollerService implements OnApplicationBootstrap, OnModuleDe
       return;
     }
     const pipelineId = run.pipelineId;
+    // Checked up front, and re-used below: a run whose connection is missing/inactive, or whose
+    // GitLab calls keep failing, must still close once it's past this — otherwise it would sit
+    // IN_PROGRESS forever, since neither of those cases was reaching the timeout check before.
+    const pastTimeout = Date.now() - run.startedAt.getTime() > this.cfg.runTimeoutMs;
+
     const connection = await this.prisma.gitlabConnection.findUnique({ where: { userId }, select: { state: true } });
-    if (connection?.state !== GitlabConnectionState.ACTIVE) return; // paused until the user reconnects, or there is no connection at all
+    if (connection?.state !== GitlabConnectionState.ACTIVE) {
+      if (pastTimeout) {
+        await this.importer.close(run.id, `${TIMED_OUT_NOTE} (the tester's GitLab connection needs to be reconnected)`);
+      }
+      return; // otherwise: paused until the user reconnects, or there is no connection at all
+    }
 
     // Always ask GitLab first, even past the run timeout: a pipeline that already finished must be
-    // imported, not discarded as timed out just because the poll happened to lag behind it.
+    // imported, not discarded as timed out just because the poll happened to lag behind it. Once
+    // past the timeout, this doubles as the one last attempt before giving up.
     let pipeline: GitlabPipeline;
     try {
       pipeline = await this.gitlab.withToken(userId, (token) => this.api.getPipeline(token, gitlabProjectId, pipelineId));
@@ -154,31 +168,43 @@ export class PipelinePollerService implements OnApplicationBootstrap, OnModuleDe
         await this.importer.close(run.id, 'The pipeline no longer exists in GitLab');
         return;
       }
+      if (pastTimeout) {
+        await this.importer.close(run.id, TIMED_OUT_NOTE);
+        return;
+      }
       throw e;
     }
 
-    if (!(await this.isFinal(userId, gitlabProjectId, pipeline))) {
-      if (Date.now() - run.startedAt.getTime() > this.cfg.runTimeoutMs) {
-        await this.importer.close(run.id, 'Timed out waiting for GitLab');
-        return;
-      }
-      if (pipeline.status !== run.pipelineStatus) {
-        await this.prisma.testRun.update({ where: { id: run.id }, data: { pipelineStatus: pipeline.status }, select: { id: true } });
-      }
+    const finalStatus = await this.resolveFinalStatus(userId, gitlabProjectId, pipeline);
+    if (finalStatus !== null) {
+      // A trailing manual/blocked gate job (e.g. a deploy step) can leave the pipeline itself
+      // not-yet-final even though the test job has already finished; store that job's own final
+      // status (e.g. success/failed) rather than the pipeline's still-manual/running one.
+      const resolved = finalStatus === pipeline.status ? pipeline : { ...pipeline, status: finalStatus };
+      await this.gitlab.withToken(userId, (token) => this.importer.importPipeline(token, run.id, resolved));
       return;
     }
-    await this.gitlab.withToken(userId, (token) => this.importer.importPipeline(token, run.id, pipeline));
+
+    if (pastTimeout) {
+      await this.importer.close(run.id, TIMED_OUT_NOTE);
+      return;
+    }
+    if (pipeline.status !== run.pipelineStatus) {
+      await this.prisma.testRun.update({ where: { id: run.id }, data: { pipelineStatus: pipeline.status }, select: { id: true } });
+    }
   }
 
   /**
-   * Whether the pipeline is done. A trailing manual/blocked gate job (e.g. a deploy step) can leave
-   * the pipeline itself not-yet-final even though the test job has already finished, so the
-   * ejad-playwright job's own status is checked too — the run's tests are done either way.
+   * The status to import/store once the run is done, or null while it's still going. Checks the
+   * pipeline's own status first; if that's not yet final, falls back to the ejad-playwright job's
+   * status (a trailing manual/blocked gate job can leave the pipeline itself not-yet-final even
+   * though the test job has already finished — the run's tests are done either way). With no such
+   * job, only the pipeline's own status decides — never guess from some other job.
    */
-  private async isFinal(userId: string, gitlabProjectId: number, pipeline: GitlabPipeline): Promise<boolean> {
-    if (FINAL_PIPELINE_STATUSES.has(pipeline.status)) return true;
+  private async resolveFinalStatus(userId: string, gitlabProjectId: number, pipeline: GitlabPipeline): Promise<string | null> {
+    if (FINAL_PIPELINE_STATUSES.has(pipeline.status)) return pipeline.status;
     const jobs = await this.gitlab.withToken(userId, (token) => this.api.listPipelineJobs(token, gitlabProjectId, pipeline.id));
-    const job = jobs.find((j) => j.name === EJAD_PLAYWRIGHT_JOB_NAME) ?? jobs[0];
-    return !!job && FINAL_PIPELINE_STATUSES.has(job.status);
+    const job = jobs.find((j) => j.name === EJAD_PLAYWRIGHT_JOB_NAME);
+    return job && FINAL_PIPELINE_STATUSES.has(job.status) ? job.status : null;
   }
 }

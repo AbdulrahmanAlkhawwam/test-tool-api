@@ -215,6 +215,19 @@ describe('Pipeline polling and result import (e2e)', () => {
     expect((await detail(run.id)).status).toBe('COMPLETED');
   });
 
+  it('closes a run past the run timeout instead of pausing it forever when the tester needs to reconnect', async () => {
+    const run = await trigger({ mode: 'ALL' });
+    fake.finishPipeline(run.pipelineId, 'success', REPORT);
+    await ctx.prisma.gitlabConnection.update({ where: { userId: actors.tester.id }, data: { state: 'NEEDS_RECONNECT' } });
+    await ctx.prisma.testRun.update({ where: { id: run.id }, data: { startedAt: new Date(Date.now() - 3 * 3_600_000) } });
+    await poll();
+    expect(await detail(run.id)).toMatchObject({
+      status: 'COMPLETED',
+      note: "Timed out waiting for GitLab (the tester's GitLab connection needs to be reconnected)",
+    });
+    expect(fake.requestsTo(`/pipelines/${run.pipelineId}`, 'GET')).toHaveLength(0);
+  });
+
   it('closing the app while a poll is in flight waits for it, without logging an error', async () => {
     const run = await trigger({ mode: 'ALL' });
     const release = fake.holdPipelineRequests();

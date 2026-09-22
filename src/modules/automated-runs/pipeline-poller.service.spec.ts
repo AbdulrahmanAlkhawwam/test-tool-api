@@ -100,13 +100,80 @@ describe('PipelinePollerService', () => {
     const findMany = jest.fn().mockResolvedValue([makeRun({})]);
     const findUnique = jest.fn().mockResolvedValue(null);
     const getPipeline = jest.fn();
+    const close = jest.fn();
     const { service } = makeService({
       prisma: { testRun: { findMany, update: jest.fn() }, gitlabConnection: { findUnique } },
       api: { getPipeline, listPipelineJobs: jest.fn() },
+      importer: { close, importPipeline: jest.fn() },
     });
 
     await service.pollOnce();
     expect(getPipeline).not.toHaveBeenCalled();
+    // Not past the run timeout yet: still just paused, not closed.
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('closes a disconnected user’s run once it is past the run timeout, instead of leaving it stuck forever', async () => {
+    const findMany = jest.fn().mockResolvedValue([makeRun({ startedAt: new Date(Date.now() - 999_999_999) })]);
+    const findUnique = jest.fn().mockResolvedValue(null);
+    const getPipeline = jest.fn();
+    const close = jest.fn();
+    const { service } = makeService({
+      prisma: { testRun: { findMany, update: jest.fn() }, gitlabConnection: { findUnique } },
+      api: { getPipeline, listPipelineJobs: jest.fn() },
+      importer: { close, importPipeline: jest.fn() },
+    });
+
+    await service.pollOnce();
+    expect(getPipeline).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledWith('r1', "Timed out waiting for GitLab (the tester's GitLab connection needs to be reconnected)");
+  });
+
+  it('closes a NEEDS_RECONNECT run once it is past the run timeout', async () => {
+    const findMany = jest.fn().mockResolvedValue([makeRun({ startedAt: new Date(Date.now() - 999_999_999) })]);
+    const findUnique = jest.fn().mockResolvedValue({ state: 'NEEDS_RECONNECT' });
+    const getPipeline = jest.fn();
+    const close = jest.fn();
+    const { service } = makeService({
+      prisma: { testRun: { findMany, update: jest.fn() }, gitlabConnection: { findUnique } },
+      api: { getPipeline, listPipelineJobs: jest.fn() },
+      importer: { close, importPipeline: jest.fn() },
+    });
+
+    await service.pollOnce();
+    expect(getPipeline).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledWith('r1', "Timed out waiting for GitLab (the tester's GitLab connection needs to be reconnected)");
+  });
+
+  it('closes a run once it is past the run timeout after a persistent 403 from GitLab', async () => {
+    const findMany = jest.fn().mockResolvedValue([makeRun({ startedAt: new Date(Date.now() - 999_999_999) })]);
+    const getPipeline = jest.fn().mockRejectedValue(new ForbiddenException('reconnect'));
+    const close = jest.fn();
+    const { service } = makeService({
+      prisma: { testRun: { findMany, update: jest.fn() }, gitlabConnection: { findUnique: jest.fn().mockResolvedValue({ state: 'ACTIVE' }) } },
+      api: { getPipeline, listPipelineJobs: jest.fn() },
+      importer: { close, importPipeline: jest.fn() },
+    });
+
+    await service.pollOnce();
+    // Once past the timeout, the failure itself closes the run (with the generic timeout note)
+    // instead of being rethrown to just log a warning and try again next pass.
+    expect(close).toHaveBeenCalledWith('r1', 'Timed out waiting for GitLab');
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves a run with a persistent 403 merely paused (not closed) while still under the run timeout', async () => {
+    const findMany = jest.fn().mockResolvedValue([makeRun({})]);
+    const getPipeline = jest.fn().mockRejectedValue(new ForbiddenException('reconnect'));
+    const close = jest.fn();
+    const { service } = makeService({
+      prisma: { testRun: { findMany, update: jest.fn() }, gitlabConnection: { findUnique: jest.fn().mockResolvedValue({ state: 'ACTIVE' }) } },
+      api: { getPipeline, listPipelineJobs: jest.fn() },
+      importer: { close, importPipeline: jest.fn() },
+    });
+
+    await service.pollOnce();
+    expect(close).not.toHaveBeenCalled();
   });
 
   it.each(['success', 'failed', 'canceled', 'skipped'])('imports once the pipeline reaches a final status (%s)', async (status) => {
@@ -138,7 +205,26 @@ describe('PipelinePollerService', () => {
     });
 
     await service.pollOnce();
-    expect(importPipeline).toHaveBeenCalled();
+    // Stores the job's own final status ('success'), not the pipeline's still-manual one.
+    expect(importPipeline).toHaveBeenCalledWith('tok', 'r1', expect.objectContaining({ status: 'success' }));
+  });
+
+  it('treats the run as not-yet-final when there is no ejad-playwright job at all, instead of guessing from some other job', async () => {
+    const findMany = jest.fn().mockResolvedValue([makeRun({ pipelineStatus: 'manual' })]);
+    const getPipeline = jest.fn().mockResolvedValue(makePipeline({ status: 'manual' }));
+    // Only unrelated jobs, all of them final — a naive "first job" fallback would wrongly treat
+    // this pipeline as done.
+    const listPipelineJobs = jest.fn().mockResolvedValue([{ id: 1, name: 'deploy', status: 'success', webUrl: 'x' }]);
+    const importPipeline = jest.fn();
+    const update = jest.fn();
+    const { service } = makeService({
+      prisma: { testRun: { findMany, update }, gitlabConnection: { findUnique: jest.fn().mockResolvedValue({ state: 'ACTIVE' }) } },
+      api: { getPipeline, listPipelineJobs },
+      importer: { close: jest.fn(), importPipeline },
+    });
+
+    await service.pollOnce();
+    expect(importPipeline).not.toHaveBeenCalled();
   });
 
   it('does not treat the run as final while the ejad-playwright job is still running and the pipeline is manual/blocked', async () => {
