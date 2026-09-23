@@ -1,5 +1,6 @@
-import { CreatedVia, Priority, ReviewState, Role } from '@prisma/client';
+import { ApiTokenPurpose, CreatedVia, Priority, ReviewState, Role } from '@prisma/client';
 import { randomUUID } from 'crypto';
+import { apiTokenPrefix, generateApiToken, hashApiToken } from '../../src/modules/api-tokens/api-token';
 import { hashPassword } from '../../src/common/password';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { TestContext } from './test-app';
@@ -77,4 +78,26 @@ export async function seedCase(
       updatedById: data.userId,
     },
   });
+}
+
+/** Creates a usable PAT and returns both the raw value and the stored row. */
+export async function seedApiToken(
+  prisma: PrismaService,
+  userId: string,
+  overrides: { name?: string; expiresAt?: Date; revokedAt?: Date | null; lastUsedAt?: Date | null } = {},
+) {
+  const token = generateApiToken();
+  const record = await prisma.apiToken.create({
+    data: {
+      userId,
+      name: overrides.name ?? 'Test token',
+      purpose: ApiTokenPurpose.MCP,
+      tokenHash: hashApiToken(token),
+      prefix: apiTokenPrefix(token),
+      expiresAt: overrides.expiresAt ?? new Date(Date.now() + 90 * 86_400_000),
+      revokedAt: overrides.revokedAt ?? null,
+      lastUsedAt: overrides.lastUsedAt ?? null,
+    },
+  });
+  return { token, record };
 }

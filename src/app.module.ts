@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import configuration from './config/configuration';
 import { HealthController } from './health.controller';
+import { ApiTokensModule } from './modules/api-tokens/api-tokens.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { AutomatedRunsModule } from './modules/automated-runs/automated-runs.module';
 import { AutomationModule } from './modules/automation/automation.module';
@@ -21,6 +22,7 @@ import { PrismaModule } from './prisma/prisma.module';
     PrismaModule,
     AuthModule,
     UsersModule,
+    ApiTokensModule,
     ProjectsModule,
     ProjectModulesModule,
     TestCasesModule,
