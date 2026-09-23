@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, RunStatus } from '@prisma/client';
+import { APPROVED_CASE } from '../../common/review-state';
 import { countStatuses, loadRunSummaries, summarize } from '../../common/run-summary';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -111,7 +112,7 @@ export class RunsService {
   }
 
   private selectionWhere(projectId: string, selection: RunSelectionDto): Prisma.TestCaseWhereInput {
-    const where: Prisma.TestCaseWhereInput = { projectId, deletedAt: null };
+    const where: Prisma.TestCaseWhereInput = { projectId, ...APPROVED_CASE };
     const require = <T>(values: T[] | undefined, field: string): T[] => {
       if (!values?.length) throw new BadRequestException(`selection.${field} is required for mode ${selection.mode}`);
       return values;

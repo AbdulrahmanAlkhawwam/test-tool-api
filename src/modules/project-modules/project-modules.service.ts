@@ -1,4 +1,5 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { APPROVED_CASE } from '../../common/review-state';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
 import { CreateModuleDto } from './dto/create-module.dto';
@@ -16,7 +17,7 @@ export class ProjectModulesService {
     const modules = await this.prisma.projectModule.findMany({
       where: { projectId },
       orderBy: { code: 'asc' },
-      include: { _count: { select: { testCases: { where: { deletedAt: null } } } } },
+      include: { _count: { select: { testCases: { where: APPROVED_CASE } } } },
     });
     return modules.map((m) => ({ id: m.id, name: m.name, code: m.code, caseCount: m._count.testCases }));
   }

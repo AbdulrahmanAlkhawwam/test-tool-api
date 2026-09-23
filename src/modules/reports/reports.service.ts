@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Priority, ResultStatus, RunStatus } from '@prisma/client';
 import { getLatestExecutedResults } from '../../common/latest-results';
+import { APPROVED_CASE } from '../../common/review-state';
 import { loadRunSummaries, StatusCounts, summarize } from '../../common/run-summary';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
@@ -28,7 +29,7 @@ export class ReportsService {
 
     const [cases, latest] = await Promise.all([
       this.prisma.testCase.findMany({
-        where: { projectId, deletedAt: null },
+        where: { projectId, ...APPROVED_CASE },
         select: { id: true, code: true, name: true, priority: true, module: { select: { id: true, name: true, code: true } } },
         orderBy: { code: 'asc' },
       }),
@@ -78,7 +79,7 @@ export class ReportsService {
     const activeProject = { archivedAt: null };
     const [projectCount, testCaseCount, runsInProgress, recent] = await Promise.all([
       this.prisma.project.count({ where: activeProject }),
-      this.prisma.testCase.count({ where: { deletedAt: null, project: activeProject } }),
+      this.prisma.testCase.count({ where: { ...APPROVED_CASE, project: activeProject } }),
       this.prisma.testRun.count({ where: { status: RunStatus.IN_PROGRESS, project: activeProject } }),
       this.prisma.testRun.findMany({
         where: { project: activeProject },

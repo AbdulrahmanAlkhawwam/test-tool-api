@@ -96,4 +96,22 @@ describe('Automation coverage (e2e)', () => {
     const headsForHugeFile = fake.requests.filter((r) => r.method === 'HEAD' && r.path.includes('huge.spec.ts'));
     expect(headsForHugeFile).toHaveLength(1);
   });
+
+  it('ignores AI drafts: they are not automated yet and their tags stay unknown', async () => {
+    const auth = await ctx.prisma.projectModule.findFirstOrThrow({ where: { projectId, code: 'AUTH' } });
+    await seedCase(ctx.prisma, {
+      projectId, moduleId: auth.id, userId: actors.admin.id, code: 'TC-AUTH-004',
+      reviewState: 'AI_DRAFT', createdVia: 'AI',
+    });
+    // TC-AUTH-999 is tagged in LOGIN_SPEC; as a draft it must still count as an unknown tag.
+    await seedCase(ctx.prisma, {
+      projectId, moduleId: auth.id, userId: actors.admin.id, code: 'TC-AUTH-999',
+      reviewState: 'AI_DRAFT', createdVia: 'AI',
+    });
+
+    const res = await coverage().expect(200);
+    expect(res.body.notAutomated.map((c: { code: string }) => c.code)).toEqual(['TC-AUTH-003', 'TC-CART-001']);
+    expect(res.body.files[0].unknownCodes).toEqual(['TC-AUTH-999']);
+    expect(JSON.stringify(res.body)).not.toContain('TC-AUTH-004');
+  });
 });

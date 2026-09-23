@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { mapWithConcurrency } from '../../common/concurrency';
+import { APPROVED_CASE } from '../../common/review-state';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GitlabApiService } from '../gitlab/gitlab-api.service';
@@ -55,7 +56,7 @@ export class CoverageService {
     });
 
     const cases = await this.prisma.testCase.findMany({
-      where: { projectId, deletedAt: null },
+      where: { projectId, ...APPROVED_CASE },
       orderBy: { code: 'asc' },
       select: { id: true, code: true, name: true, module: { select: { code: true, name: true } } },
     });

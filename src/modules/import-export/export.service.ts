@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Priority, ResultStatus } from '@prisma/client';
 import { getLatestExecutedResults } from '../../common/latest-results';
+import { APPROVED_CASE } from '../../common/review-state';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
 import { buildTemplateWorkbook, ExportRow } from './export.builder';
@@ -21,7 +22,7 @@ export class ExportService {
     const project = await this.projects.requireProject(projectId);
     const [cases, latest] = await Promise.all([
       this.prisma.testCase.findMany({
-        where: { projectId, deletedAt: null },
+        where: { projectId, ...APPROVED_CASE },
         include: { module: { select: { name: true } } },
         orderBy: { code: 'asc' },
       }),

@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { RunStatus, RunType } from '@prisma/client';
+import { APPROVED_CASE } from '../../common/review-state';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AutomationService, LinkedProject } from '../automation/automation.service';
@@ -122,7 +123,7 @@ export class AutomatedRunsService {
         const ids = [...new Set(scope.caseIds ?? [])];
         if (!ids.length) throw new BadRequestException('scope.caseIds is required for mode CASES');
         const cases = await this.prisma.testCase.findMany({
-          where: { id: { in: ids }, projectId: project.id, deletedAt: null },
+          where: { id: { in: ids }, projectId: project.id, ...APPROVED_CASE },
           select: { id: true, code: true },
           orderBy: { code: 'asc' },
         });

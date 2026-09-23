@@ -1,4 +1,4 @@
-import { Priority, ResultStatus } from '@prisma/client';
+import { Priority, ResultStatus, ReviewState } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
 
@@ -12,6 +12,10 @@ export class ListTestCasesQuery {
   /** Filter by latest executed status. NOT_EXECUTED = never executed. */
   @IsOptional() @IsEnum(ResultStatus)
   status?: ResultStatus;
+
+  /** AI_DRAFT shows the AI drafts only; APPROVED shows reviewed cases only; omitted shows both. */
+  @IsOptional() @IsEnum(ReviewState)
+  reviewState?: ReviewState;
 
   @IsOptional() @IsString() @MaxLength(200)
   q?: string;

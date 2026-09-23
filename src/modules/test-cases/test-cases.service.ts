@@ -1,7 +1,8 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ResultStatus } from '@prisma/client';
+import { Prisma, ResultStatus, ReviewState } from '@prisma/client';
 import { getLatestExecutedResults } from '../../common/latest-results';
 import { isUniqueViolation } from '../../common/prisma-errors';
+import { ACTIVE_CASE } from '../../common/review-state';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
@@ -28,9 +29,10 @@ export class TestCasesService {
     await this.projects.requireProject(projectId);
     const latest = await getLatestExecutedResults(this.prisma, projectId);
 
-    const where: Prisma.TestCaseWhereInput = { projectId, deletedAt: null };
+    const where: Prisma.TestCaseWhereInput = { projectId, ...ACTIVE_CASE };
     if (query.moduleId) where.moduleId = query.moduleId;
     if (query.priority) where.priority = query.priority;
+    if (query.reviewState) where.reviewState = query.reviewState;
     if (query.q) {
       where.OR = [
         { name: { contains: query.q, mode: 'insensitive' } },
@@ -42,6 +44,13 @@ export class TestCasesService {
       where.id = { notIn: [...latest.keys()] };
     } else if (query.status) {
       where.id = { in: [...latest.values()].filter((r) => r.status === query.status).map((r) => r.testCaseId) };
+    }
+    if (query.status) {
+      // A latest-status filter is about executed work. Drafts never enter a run, so a draft can
+      // never legitimately match one — least of all NOT_EXECUTED, which would otherwise list
+      // every unreviewed draft as a case nobody has tested yet. Kept as a separate AND clause so
+      // an explicit reviewState=AI_DRAFT still narrows (to nothing) instead of being overwritten.
+      where.AND = [{ reviewState: ReviewState.APPROVED }];
     }
 
     const [total, items] = await Promise.all([

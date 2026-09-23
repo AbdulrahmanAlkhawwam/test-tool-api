@@ -1,5 +1,6 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, Project } from '@prisma/client';
+import { APPROVED_CASE } from '../../common/review-state';
 import { loadRunSummaries } from '../../common/run-summary';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -20,7 +21,7 @@ export class ProjectsService {
     const projects = await this.prisma.project.findMany({
       where: includeArchived ? {} : { archivedAt: null },
       orderBy: { name: 'asc' },
-      include: { _count: { select: { testCases: { where: { deletedAt: null } } } } },
+      include: { _count: { select: { testCases: { where: APPROVED_CASE } } } },
     });
     const ids = projects.map((p) => p.id);
     if (!ids.length) return [];
@@ -70,7 +71,7 @@ export class ProjectsService {
       include: {
         modules: {
           orderBy: { code: 'asc' },
-          include: { _count: { select: { testCases: { where: { deletedAt: null } } } } },
+          include: { _count: { select: { testCases: { where: APPROVED_CASE } } } },
         },
       },
     });

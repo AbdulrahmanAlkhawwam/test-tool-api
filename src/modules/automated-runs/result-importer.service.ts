@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ResultStatus, RunStatus } from '@prisma/client';
+import { APPROVED_CASE } from '../../common/review-state';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GitlabApiService } from '../gitlab/gitlab-api.service';
 import { EJAD_PLAYWRIGHT_JOB_NAME, GitlabPipeline } from '../gitlab/gitlab.types';
@@ -43,7 +44,7 @@ export class ResultImporterService {
 
     const artifactsUrl = job && run.project.gitlabWebUrl ? `${run.project.gitlabWebUrl}/-/jobs/${job.id}/artifacts/browse` : null;
     const executedAt = pipeline.finishedAt ? new Date(pipeline.finishedAt) : new Date();
-    const cases = await this.prisma.testCase.findMany({ where: { projectId: run.projectId, deletedAt: null }, select: { id: true, code: true } });
+    const cases = await this.prisma.testCase.findMany({ where: { projectId: run.projectId, ...APPROVED_CASE }, select: { id: true, code: true } });
     const report = mapTestReport(suites, new Map(cases.map((c) => [c.code, c.id])));
     const fields = (r: MappedResult) => ({
       status: r.status,
