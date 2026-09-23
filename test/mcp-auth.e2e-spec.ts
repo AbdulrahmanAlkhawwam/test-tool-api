@@ -27,6 +27,15 @@ describe('MCP authentication (e2e)', () => {
       .set(token ? { ...JSON_RPC_HEADERS, Authorization: `Bearer ${token}` } : JSON_RPC_HEADERS)
       .send(PING);
 
+  it('answers 200 on an authenticated ping over raw HTTP', async () => {
+    // A regression that made every authenticated POST answer 400 (e.g. a broken request-body
+    // pass-through to the transport) would still pass every 401/429 test below, since none of
+    // them checks for success. This pins the happy path explicitly.
+    const { token } = await seedApiToken(ctx.prisma, actors.tester.id);
+    const res = await ping(token).expect(200);
+    expect(res.body).toMatchObject({ jsonrpc: '2.0', id: 1, result: {} });
+  });
+
   it('connects a real MCP client with a valid token', async () => {
     const { token } = await seedApiToken(ctx.prisma, actors.tester.id);
     const client = await connectMcp(ctx, token);
@@ -112,6 +121,29 @@ describe('MCP authentication (e2e)', () => {
     const third = (await ctx.prisma.apiToken.findUniqueOrThrow({ where: { id: record.id } })).lastUsedAt!;
     expect(third.getTime()).toBeGreaterThan(Date.now() - 10_000);
   });
+
+  it('throttles per IP before authentication, so a flood of invalid tokens cannot dodge it', async () => {
+    // A dedicated app so this test's IP bucket starts empty — the per-IP limit (300/min) would
+    // otherwise accumulate across every other test in this file that shares `ctx`.
+    const fresh = await createMcpTestApp();
+    try {
+      const req = () => request(fresh.app.getHttpServer()).post('/api/mcp').set(JSON_RPC_HEADERS).send(PING);
+      for (let i = 0; i < 300; i++) {
+        // No Authorization header at all: the per-token limiter inside McpAuthGuard never runs
+        // for these, since they never authenticate. Only the IP-keyed guard can catch this.
+        const res = await req();
+        expect(res.status).not.toBe(429);
+      }
+      const limited = await req().expect(429);
+      expect(limited.body).toEqual({
+        statusCode: 429,
+        error: 'Too Many Requests',
+        message: 'Too many MCP requests, please slow down',
+      });
+    } finally {
+      await fresh.app.close();
+    }
+  }, 30_000);
 
   it('answers 405 on GET and DELETE: the endpoint is stateless', async () => {
     const { token } = await seedApiToken(ctx.prisma, actors.tester.id);

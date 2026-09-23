@@ -14,6 +14,13 @@ const INSTRUCTIONS = [
 /**
  * One MCP server per request (stateless Streamable HTTP). Tools are registered per user, so
  * every call runs with that token owner's identity and role — exactly like the web app.
+ *
+ * Warning for future tool handlers: the SDK passes each handler an `extra` argument whose
+ * `extra.requestInfo.headers` is the raw incoming HTTP headers for this request — including the
+ * `Authorization: Bearer ejad_pat_…` header with the caller's live personal access token. Never
+ * log `extra.requestInfo.headers` (or `extra.requestInfo` as a whole) or put it in an error
+ * message or tool result; treat it exactly like the token itself (see the Global Constraints
+ * "never log or return a raw token" rule).
  */
 @Injectable()
 export class McpServerFactory {

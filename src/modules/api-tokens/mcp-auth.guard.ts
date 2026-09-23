@@ -19,7 +19,10 @@ export class McpAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest();
     const [scheme, raw] = String(req.headers.authorization ?? '').split(' ');
-    if (scheme !== 'Bearer' || !raw) throw new UnauthorizedException(BAD_TOKEN);
+    // RFC 6750 doesn't say the scheme name is case-sensitive, and other HTTP auth schemes
+    // (RFC 7235 §2.1) are explicitly case-insensitive, so a client sending "bearer" is normal,
+    // not malformed.
+    if (scheme?.toLowerCase() !== 'bearer' || !raw) throw new UnauthorizedException(BAD_TOKEN);
 
     // verify() throws 401 with the same message for unknown, revoked, expired and inactive.
     const { tokenId, lastUsedAt, user } = await this.tokens.verify(raw);
