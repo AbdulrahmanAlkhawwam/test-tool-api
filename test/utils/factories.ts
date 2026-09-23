@@ -80,6 +80,21 @@ export async function seedCase(
   });
 }
 
+/** Stores a PENDING AI suggestion directly (the only producer in the app is the MCP tool). */
+export async function seedSuggestion(
+  prisma: PrismaService,
+  data: { testCaseId: string; userId: string; changes: Record<string, { from: string | null; to: string | null }>; rationale?: string },
+) {
+  return prisma.testCaseSuggestion.create({
+    data: {
+      testCaseId: data.testCaseId,
+      createdById: data.userId,
+      changes: data.changes,
+      rationale: data.rationale ?? 'The steps were missing the submit action',
+    },
+  });
+}
+
 /** Creates a usable PAT and returns both the raw value and the stored row. */
 export async function seedApiToken(
   prisma: PrismaService,

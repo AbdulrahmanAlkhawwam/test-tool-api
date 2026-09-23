@@ -13,6 +13,7 @@ import { ProjectModulesModule } from './modules/project-modules/project-modules.
 import { ProjectsModule } from './modules/projects/projects.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { RunsModule } from './modules/runs/runs.module';
+import { SuggestionsModule } from './modules/suggestions/suggestions.module';
 import { TestCasesModule } from './modules/test-cases/test-cases.module';
 import { UsersModule } from './modules/users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -27,6 +28,7 @@ import { PrismaModule } from './prisma/prisma.module';
     ProjectsModule,
     ProjectModulesModule,
     TestCasesModule,
+    SuggestionsModule,
     RunsModule,
     ImportExportModule,
     ReportsModule,
