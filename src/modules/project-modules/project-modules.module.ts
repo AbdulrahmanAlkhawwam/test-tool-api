@@ -7,5 +7,6 @@ import { ProjectModulesService } from './project-modules.service';
   imports: [ProjectsModule],
   controllers: [ProjectModulesController],
   providers: [ProjectModulesService],
+  exports: [ProjectModulesService],
 })
 export class ProjectModulesModule {}
