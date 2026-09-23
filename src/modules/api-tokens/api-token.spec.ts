@@ -38,11 +38,21 @@ describe('api-token', () => {
     expect(hash).not.toContain(token.slice(PAT_PREFIX.length));
   });
 
-  it('compares hashes in constant time and rejects a mismatch or a wrong length', () => {
+  it('accepts a matching hash and rejects a mismatch or a wrong length', () => {
     const hash = hashApiToken('ejad_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     expect(verifyApiTokenHash(hash, hash)).toBe(true);
     expect(verifyApiTokenHash(hashApiToken('other'), hash)).toBe(false);
     expect(verifyApiTokenHash('deadbeef', hash)).toBe(false);
+  });
+
+  it('fails closed instead of throwing when a stored hash is the right length but not valid hex', () => {
+    const hash = hashApiToken('ejad_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    // Same string length as a real hex hash (64 chars), but 'z' is not a hex digit, so decoding
+    // it yields fewer than 32 bytes. This must return false, not throw a RangeError.
+    const corrupt = 'z'.repeat(64);
+    expect(hash).toHaveLength(64);
+    expect(() => verifyApiTokenHash(hash, corrupt)).not.toThrow();
+    expect(verifyApiTokenHash(hash, corrupt)).toBe(false);
   });
 
   it('recognises only PAT-shaped values, not JWTs', () => {

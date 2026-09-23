@@ -73,8 +73,10 @@ export class ApiTokensService {
 
   /**
    * Resolves a raw token to its owner, or throws 401. Every failure uses the same message and
-   * never includes the token value. The lookup is by unique hash; the stored hash is then
-   * re-compared in constant time so a partial-index timing difference cannot leak it.
+   * never includes the token value. The lookup is an equality match on `tokenHash`'s unique
+   * index; `verifyApiTokenHash` then re-checks the row it found, which is a defensive integrity
+   * check (it can never reject that row), not a timing mitigation. The real defence against
+   * guessing a token is its entropy: ~190 bits behind SHA-256.
    */
   async verify(rawToken: string): Promise<VerifiedApiToken> {
     if (!isApiTokenFormat(rawToken)) throw new UnauthorizedException(BAD_TOKEN);

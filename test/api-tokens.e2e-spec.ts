@@ -39,13 +39,33 @@ describe('API tokens (e2e)', () => {
     const created = await ctx.http().post('/api/users/me/tokens').set(actors.testerAuth).send({ name: 'Cursor' }).expect(201);
     expect(Math.round((new Date(created.body.expiresAt).getTime() - Date.now()) / 86_400_000)).toBe(90);
 
-    for (const payload of [{ name: '' }, { name: 'x', expiresInDays: 45 }, { name: 'x', expiresInDays: 0 }, {}]) {
+    for (const payload of [
+      { name: '' },
+      { name: '   ' },
+      { name: 'x', expiresInDays: 45 },
+      { name: 'x', expiresInDays: 0 },
+      { name: 'x', expiresInDays: null },
+      {},
+    ]) {
       const res = await ctx.http().post('/api/users/me/tokens').set(actors.testerAuth).send(payload).expect(400);
       expect(res.body.message).toBe('Validation failed');
     }
   });
 
-  it('revokes only the caller’s own tokens', async () => {
+  it('trims the name before validating and storing it', async () => {
+    const created = await ctx.http().post('/api/users/me/tokens').set(actors.testerAuth)
+      .send({ name: '  Claude Code  ' }).expect(201);
+    expect(created.body.name).toBe('Claude Code');
+  });
+
+  it('rejects a userId in the create body instead of silently ignoring it', async () => {
+    const res = await ctx.http().post('/api/users/me/tokens').set(actors.testerAuth)
+      .send({ name: 'Spoofed', userId: actors.admin.id }).expect(400);
+    expect(res.body.message).toBe('Validation failed');
+    expect(await ctx.prisma.apiToken.count({ where: { userId: actors.admin.id } })).toBe(0);
+  });
+
+  it('revokes only the caller’s own tokens, and list() is scoped to the caller', async () => {
     const mine = await seedApiToken(ctx.prisma, actors.tester.id);
     const theirs = await seedApiToken(ctx.prisma, actors.admin.id);
 
@@ -57,6 +77,10 @@ describe('API tokens (e2e)', () => {
     expect(res.body.message).toBe('Token not found');
     await ctx.http().delete(`/api/users/me/tokens/${mine.record.id}`).set(actors.testerAuth).expect(404);
     expect(await ctx.prisma.apiToken.count({ where: { userId: actors.tester.id } })).toBe(1);
+
+    const list = await ctx.http().get('/api/users/me/tokens').set(actors.testerAuth).expect(200);
+    expect(list.body.map((t: { id: string }) => t.id)).not.toContain(theirs.record.id);
+    expect(list.body.map((t: { id: string }) => t.id)).toContain(mine.record.id);
   });
 
   it('needs a browser JWT: a PAT cannot manage tokens', async () => {

@@ -36,13 +36,19 @@ export function apiTokenPrefix(token: string): string {
 }
 
 /**
- * Constant-time hash comparison. Both hashes are fixed-length hex, so a length mismatch can
- * only come from corrupt data; it returns false without calling timingSafeEqual (which throws
- * on differing lengths).
+ * Defensive equality check on the row `ApiTokensService#verify` already found by an equality
+ * lookup on `tokenHash`'s unique index — it can never reject that row, so it is not a timing
+ * mitigation. It guards against corrupt stored data: a `storedHash` that is the right string
+ * length (64) but not valid hex decodes to fewer than 32 bytes, which would make
+ * `timingSafeEqual` throw a RangeError instead of failing closed. The actual defence against
+ * guessing a token is its entropy — ~190 bits behind SHA-256 (see PAT_BODY_LENGTH).
  */
 export function verifyApiTokenHash(candidateHash: string, storedHash: string): boolean {
   if (candidateHash.length !== storedHash.length) return false;
-  return timingSafeEqual(Buffer.from(candidateHash, 'hex'), Buffer.from(storedHash, 'hex'));
+  const candidate = Buffer.from(candidateHash, 'hex');
+  const stored = Buffer.from(storedHash, 'hex');
+  if (candidate.length !== 32 || stored.length !== 32) return false;
+  return timingSafeEqual(candidate, stored);
 }
 
 /** True for values shaped like a PAT. Used to keep browser JWTs off the MCP endpoint. */
