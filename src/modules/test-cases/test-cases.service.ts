@@ -6,18 +6,11 @@ import { ACTIVE_CASE } from '../../common/review-state';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
+import { CASE_INCLUDE, USER_REF } from './case-include';
 import { nextCaseCode } from './case-code';
 import { CreateTestCaseDto } from './dto/create-test-case.dto';
 import { ListTestCasesQuery } from './dto/list-test-cases.query';
 import { UpdateTestCaseDto } from './dto/update-test-case.dto';
-
-const USER_REF = { select: { id: true, name: true } } as const;
-const CASE_INCLUDE = {
-  module: { select: { id: true, name: true, code: true } },
-  createdBy: USER_REF,
-  updatedBy: USER_REF,
-  approvedBy: USER_REF,
-} satisfies Prisma.TestCaseInclude;
 
 @Injectable()
 export class TestCasesService {
