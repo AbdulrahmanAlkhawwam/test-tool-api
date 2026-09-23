@@ -155,8 +155,20 @@ describe('MCP authentication (e2e)', () => {
         error: 'Method Not Allowed',
         message: 'The MCP endpoint is stateless: use POST',
       });
+      // RFC 9110 §15.5.6: a 405 response must include an Allow header listing the supported methods.
+      expect(res.headers.allow).toBe('POST');
     }
     // Still guarded: no token, no answer.
     await request(ctx.app.getHttpServer()).get('/api/mcp').set(JSON_RPC_HEADERS).expect(401);
+  });
+
+  it('accepts a lowercase "bearer" auth scheme, since RFC 6750/7235 do not require it to be cased', async () => {
+    const { token } = await seedApiToken(ctx.prisma, actors.tester.id);
+    const res = await request(ctx.app.getHttpServer())
+      .post('/api/mcp')
+      .set({ ...JSON_RPC_HEADERS, authorization: `bearer ${token}` })
+      .send(PING)
+      .expect(200);
+    expect(res.body).toMatchObject({ jsonrpc: '2.0', id: 1, result: {} });
   });
 });

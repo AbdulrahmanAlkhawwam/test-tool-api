@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, ResultStatus, RunStatus } from '@prisma/client';
+import { APPROVED_CASE } from '../../common/review-state';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProjectsService } from '../projects/projects.service';
@@ -44,10 +45,21 @@ export class ImportService {
     return this.prisma.$transaction(
       async (tx) => {
         const { modules, renamedModules } = await this.ensureModules(tx, projectId, rows);
-        const existing = new Map(
-          (await tx.testCase.findMany({ where: { projectId }, select: { id: true, code: true } })).map((c) => [c.code, c.id]),
+        // Every code already used in the project, in any state, so a generated or file-supplied
+        // code is never handed to a second row and a rejected draft's code is never reused.
+        const allCodes = new Set(
+          (await tx.testCase.findMany({ where: { projectId }, select: { code: true } })).map((c) => c.code),
         );
-        const allCodes = new Set(existing.keys());
+        // Only an approved, non-deleted case may be matched by the 'update' duplicate strategy.
+        // A code held by an AI draft, or by a soft-deleted (rejected) draft, stays reserved: it
+        // is never resurrected (deletedAt reset) and never silently overwritten by an import row
+        // just because the row happens to carry the same ID.
+        const updatable = new Map(
+          (await tx.testCase.findMany({ where: { projectId, ...APPROVED_CASE }, select: { id: true, code: true } })).map((c) => [
+            c.code,
+            c.id,
+          ]),
+        );
         const imported: { caseId: string; row: PreviewRow }[] = [];
         let created = 0;
         let updated = 0;
@@ -70,7 +82,7 @@ export class ImportService {
             moduleId: modules.get(row.moduleCode)!.id,
             updatedById: user.id,
           };
-          const existingId = row.code ? existing.get(row.code) : undefined;
+          const existingId = row.code ? updatable.get(row.code) : undefined;
           if (existingId) {
             if (dto.duplicateStrategy === 'skip') {
               skipped++;
@@ -79,6 +91,13 @@ export class ImportService {
             await tx.testCase.update({ where: { id: existingId }, data: { ...fields, deletedAt: null } });
             imported.push({ caseId: existingId, row });
             updated++;
+            continue;
+          }
+          if (row.code && allCodes.has(row.code)) {
+            // The code is taken by a case that isn't an approved, active match above — an AI
+            // draft or a rejected (soft-deleted) draft. It stays reserved: never create a second
+            // row with the same code, and never fall through to the update/resurrect path.
+            skipped++;
             continue;
           }
           const code = row.code ?? nextCaseCode(modules.get(row.moduleCode)!.code, allCodes);

@@ -39,6 +39,25 @@ describe('closeOnResponseEnd', () => {
     expect(second.close).toHaveBeenCalledTimes(1);
   });
 
+  it('closes every closable even when an earlier one throws synchronously instead of rejecting', async () => {
+    const res = new EventEmitter();
+    const throwing: Closable = {
+      close: jest.fn(() => {
+        throw new Error('boom, synchronously');
+      }),
+    };
+    const resolving: Closable = { close: jest.fn().mockResolvedValue(undefined) };
+
+    closeOnResponseEnd(res, throwing, resolving);
+    // A synchronous throw from a 'close' listener would otherwise propagate straight out of
+    // emit() (EventEmitter does not catch listener exceptions for a plain event like this one).
+    expect(() => res.emit('close')).not.toThrow();
+    await flush();
+
+    expect(throwing.close).toHaveBeenCalledTimes(1);
+    expect(resolving.close).toHaveBeenCalledTimes(1);
+  });
+
   it('does nothing until the response closes', () => {
     const res = new EventEmitter();
     const closable: Closable = { close: jest.fn().mockResolvedValue(undefined) };

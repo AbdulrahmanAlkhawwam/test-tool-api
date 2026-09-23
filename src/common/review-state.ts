@@ -1,7 +1,12 @@
 import { Prisma, ReviewState } from '@prisma/client';
 
-/** Every case that still exists — AI drafts included. Use for lists and detail reads. */
-export const ACTIVE_CASE: Prisma.TestCaseWhereInput = { deletedAt: null };
+/**
+ * Every case that still exists — AI drafts included. Use for lists and detail reads.
+ * Frozen: several call sites pass this object straight into a Prisma `where` clause (rather than
+ * spreading it), so an accidental mutation at one call site must not leak into every other one
+ * that shares this reference.
+ */
+export const ACTIVE_CASE: Prisma.TestCaseWhereInput = Object.freeze({ deletedAt: null });
 
 /**
  * Every case that counts. Spec §6: AI drafts are excluded from run creation snapshots,
@@ -9,5 +14,6 @@ export const ACTIVE_CASE: Prisma.TestCaseWhereInput = { deletedAt: null };
  * export — and, by the same reasoning, from automation coverage, automated-run selection and
  * automated result tag mapping, because a draft has no tests and belongs in no run.
  * Anything a stakeholder reads must use this filter, not ACTIVE_CASE.
+ * Frozen for the same reason as ACTIVE_CASE above.
  */
-export const APPROVED_CASE: Prisma.TestCaseWhereInput = { deletedAt: null, reviewState: ReviewState.APPROVED };
+export const APPROVED_CASE: Prisma.TestCaseWhereInput = Object.freeze({ deletedAt: null, reviewState: ReviewState.APPROVED });

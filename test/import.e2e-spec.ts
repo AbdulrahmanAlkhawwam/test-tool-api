@@ -1,3 +1,4 @@
+import { CreatedVia, ReviewState } from '@prisma/client';
 import { seedActors, seedCase, seedModule, seedProject } from './utils/factories';
 import { createTestApp, makeXlsx, resetDb, TestContext } from './utils/test-app';
 
@@ -87,6 +88,34 @@ describe('Import (e2e)', () => {
       .toEqual({ created: 1, updated: 3, skipped: 1, runId: null, renamedModules: [] });
     const updated = await ctx.prisma.testCase.findFirstOrThrow({ where: { code: 'TC-AUTH-001' } });
     expect(updated).toMatchObject({ name: 'Login with Realy user (Email)', updatedById: actors.tester.id });
+  });
+
+  it('never updates or resurrects a case whose code belongs to an AI draft or a rejected draft', async () => {
+    const module = await seedModule(ctx.prisma, projectId, { code: 'AUTH' });
+    const draftSheet = [HEADER, SHEET[1]]; // just the TC-AUTH-001 row
+
+    // The code belongs to an unreviewed AI draft: 'update' must not touch it.
+    const draft = await seedCase(ctx.prisma, {
+      projectId, moduleId: module.id, userId: actors.admin.id, code: 'TC-AUTH-001', name: 'Draft name',
+      reviewState: ReviewState.AI_DRAFT, createdVia: CreatedVia.AI,
+    });
+    const draftPreview = (await preview(await makeXlsx(draftSheet)).expect(201)).body;
+    expect((await confirm({ importId: draftPreview.importId, duplicateStrategy: 'update' }).expect(201)).body)
+      .toEqual({ created: 0, updated: 0, skipped: 1, runId: null, renamedModules: [] });
+    const untouchedDraft = await ctx.prisma.testCase.findUniqueOrThrow({ where: { id: draft.id } });
+    expect(untouchedDraft).toMatchObject({ name: 'Draft name', reviewState: 'AI_DRAFT', deletedAt: null });
+    expect(await ctx.prisma.testCase.count({ where: { projectId } })).toBe(1);
+
+    // The code belongs to a rejected (soft-deleted) draft: 'update' must not resurrect it either.
+    await ctx.http().delete(`/api/test-cases/${draft.id}`).set(actors.testerAuth).expect(204);
+    const rejectedPreview = (await preview(await makeXlsx(draftSheet)).expect(201)).body;
+    expect((await confirm({ importId: rejectedPreview.importId, duplicateStrategy: 'update' }).expect(201)).body)
+      .toEqual({ created: 0, updated: 0, skipped: 1, runId: null, renamedModules: [] });
+    const stillRejected = await ctx.prisma.testCase.findUniqueOrThrow({ where: { id: draft.id } });
+    expect(stillRejected.deletedAt).not.toBeNull();
+    expect(stillRejected.name).toBe('Draft name');
+    // No second row was created under the same code either (the code stays reserved forever).
+    expect(await ctx.prisma.testCase.count({ where: { projectId } })).toBe(1);
   });
 
   it('gives a module whose derived code is taken by a different module the next free code', async () => {
