@@ -16,6 +16,7 @@ const CASE_INCLUDE = {
   module: { select: { id: true, name: true, code: true } },
   createdBy: USER_REF,
   updatedBy: USER_REF,
+  approvedBy: USER_REF,
 } satisfies Prisma.TestCaseInclude;
 
 @Injectable()
@@ -48,9 +49,12 @@ export class TestCasesService {
     if (query.status) {
       // A latest-status filter is about executed work. Drafts never enter a run, so a draft can
       // never legitimately match one — least of all NOT_EXECUTED, which would otherwise list
-      // every unreviewed draft as a case nobody has tested yet. Kept as a separate AND clause so
-      // an explicit reviewState=AI_DRAFT still narrows (to nothing) instead of being overwritten.
-      where.AND = [{ reviewState: ReviewState.APPROVED }];
+      // every unreviewed draft as a case nobody has tested yet. Appended (not assigned) to
+      // where.AND so a future filter that also needs where.AND doesn't silently drop this
+      // exclusion, and so an explicit reviewState=AI_DRAFT still narrows (to nothing) instead of
+      // being overwritten.
+      const existingAnd = Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : [];
+      where.AND = [...existingAnd, { reviewState: ReviewState.APPROVED }];
     }
 
     const [total, items] = await Promise.all([

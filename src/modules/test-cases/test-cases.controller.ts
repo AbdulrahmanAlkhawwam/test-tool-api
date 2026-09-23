@@ -2,6 +2,8 @@ import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, P
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../../common/types/auth-user';
+import { CaseReviewService } from './case-review.service';
+import { ApproveTestCasesDto } from './dto/approve-test-cases.dto';
 import { CreateTestCaseDto } from './dto/create-test-case.dto';
 import { ListTestCasesQuery } from './dto/list-test-cases.query';
 import { UpdateTestCaseDto } from './dto/update-test-case.dto';
@@ -11,7 +13,10 @@ import { TestCasesService } from './test-cases.service';
 @ApiBearerAuth()
 @Controller()
 export class TestCasesController {
-  constructor(private readonly testCases: TestCasesService) {}
+  constructor(
+    private readonly testCases: TestCasesService,
+    private readonly review: CaseReviewService,
+  ) {}
 
   @Get('projects/:projectId/test-cases')
   list(@Param('projectId', ParseUUIDPipe) projectId: string, @Query() query: ListTestCasesQuery) {
@@ -21,6 +26,18 @@ export class TestCasesController {
   @Post('projects/:projectId/test-cases')
   create(@Param('projectId', ParseUUIDPipe) projectId: string, @Body() dto: CreateTestCaseDto, @CurrentUser() user: AuthUser) {
     return this.testCases.create(projectId, dto, user);
+  }
+
+  @Post('test-cases/approve')
+  @HttpCode(200)
+  approveMany(@Body() dto: ApproveTestCasesDto, @CurrentUser() user: AuthUser) {
+    return this.review.approveMany(dto.ids, user);
+  }
+
+  @Post('test-cases/:id/approve')
+  @HttpCode(200)
+  approve(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    return this.review.approve(id, user);
   }
 
   @Get('test-cases/:id')
