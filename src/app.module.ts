@@ -8,6 +8,7 @@ import { AutomatedRunsModule } from './modules/automated-runs/automated-runs.mod
 import { AutomationModule } from './modules/automation/automation.module';
 import { GitlabModule } from './modules/gitlab/gitlab.module';
 import { ImportExportModule } from './modules/import-export/import-export.module';
+import { McpModule } from './modules/mcp/mcp.module';
 import { ProjectModulesModule } from './modules/project-modules/project-modules.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { ReportsModule } from './modules/reports/reports.module';
@@ -32,6 +33,7 @@ import { PrismaModule } from './prisma/prisma.module';
     GitlabModule,
     AutomationModule,
     AutomatedRunsModule,
+    McpModule,
   ],
   controllers: [HealthController],
 })
