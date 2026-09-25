@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { SuggestionsService } from '../src/modules/suggestions/suggestions.service';
 import { seedActors, seedCase, seedModule, seedProject, seedSuggestion } from './utils/factories';
 import { createTestApp, resetDb, TestContext } from './utils/test-app';
 
@@ -123,5 +124,39 @@ describe('AI change suggestions (e2e)', () => {
     await ctx.http().delete(`/api/test-cases/${deletedCase.id}`).set(actors.testerAuth).expect(204);
     await ctx.http().post(`/api/suggestions/${orphan.id}/accept`).set(actors.testerAuth).expect(404);
     await ctx.http().get(`/api/test-cases/${deletedCase.id}/suggestion`).set(actors.testerAuth).expect(404);
+  });
+
+  it('refuses to accept a suggestion whose stored values are invalid, with the standard 400 body', async () => {
+    const beforeCase = await ctx.prisma.testCase.findUniqueOrThrow({ where: { id: caseId } });
+    const invalid = await seedSuggestion(ctx.prisma, {
+      testCaseId: caseId,
+      userId: actors.admin.id,
+      changes: {
+        priority: { from: beforeCase.priority, to: 'SUPERHIGH' },
+        name: { from: beforeCase.name, to: 'x'.repeat(301) },
+      },
+    });
+    const res = await ctx.http().post(`/api/suggestions/${invalid.id}/accept`).set(actors.testerAuth).expect(400);
+    expect(res.body).toMatchObject({ statusCode: 400, error: 'Bad Request', message: 'Validation failed' });
+    expect(Array.isArray(res.body.details)).toBe(true);
+    expect(res.body.details.length).toBeGreaterThan(0);
+
+    // Nothing was written: the suggestion is still pending and the case is untouched.
+    expect((await ctx.prisma.testCaseSuggestion.findUniqueOrThrow({ where: { id: invalid.id } })).status).toBe('PENDING');
+    const untouched = await ctx.prisma.testCase.findUniqueOrThrow({ where: { id: caseId } });
+    expect(untouched.priority).toBe(beforeCase.priority);
+    expect(untouched.name).toBe(beforeCase.name);
+  });
+
+  it('serializes two concurrent proposals on the same case so only one pending suggestion survives', async () => {
+    const suggestions = ctx.app.get(SuggestionsService);
+    const results = await Promise.all([
+      suggestions.createOrReplace(caseId, { steps: '1. Open Login\n2. Path A' }, 'From A', actors.admin),
+      suggestions.createOrReplace(caseId, { steps: '1. Open Login\n2. Path B' }, 'From B', actors.tester),
+    ]);
+    expect(results.every((r) => r !== null)).toBe(true);
+
+    const pending = await ctx.prisma.testCaseSuggestion.findMany({ where: { testCaseId: caseId, status: 'PENDING' } });
+    expect(pending).toHaveLength(1);
   });
 });

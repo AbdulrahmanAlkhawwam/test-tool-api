@@ -1,7 +1,11 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { Prisma, SuggestionStatus } from '@prisma/client';
 import { AuthUser } from '../../common/types/auth-user';
 import { PrismaService } from '../../prisma/prisma.service';
+import { CASE_INCLUDE, USER_REF } from '../test-cases/case-include';
+import { UpdateTestCaseDto } from '../test-cases/dto/update-test-case.dto';
 import {
   buildSuggestionChanges,
   changesToUpdateData,
@@ -16,14 +20,6 @@ const STALE = 'The test case changed since this suggestion – review it again';
 const RESOLVED = 'This suggestion has already been resolved';
 const NOT_FOUND = 'Test case not found';
 const SUGGESTION_NOT_FOUND = 'Suggestion not found';
-
-const USER_REF = { select: { id: true, name: true } } as const;
-const CASE_INCLUDE = {
-  module: { select: { id: true, name: true, code: true } },
-  createdBy: USER_REF,
-  updatedBy: USER_REF,
-  approvedBy: USER_REF,
-} satisfies Prisma.TestCaseInclude;
 
 /** The case fields a suggestion may read or write. */
 const CASE_FIELDS = {
@@ -64,20 +60,29 @@ export class SuggestionsService {
     rationale: string | undefined,
     user: AuthUser,
   ): Promise<{ suggestionId: string; changes: SuggestionChanges } | null> {
-    const current = await this.prisma.testCase.findFirst({ where: { id: testCaseId, deletedAt: null }, select: CASE_FIELDS });
-    if (!current) throw new NotFoundException(NOT_FOUND);
-    const changes = buildSuggestionChanges(current, proposed);
-    if (!Object.keys(changes).length) return null;
+    return this.prisma.$transaction(async (tx) => {
+      // Lock the test case row first so two concurrent proposals for the same case serialize.
+      // There is no unique index tying a case to its (at most one) pending suggestion, so without
+      // this lock two overlapping calls can each run deleteMany-then-create, both see zero pending
+      // rows at the time they check, and both insert — leaving two "pending" suggestions on one
+      // case. Everything below runs sequentially (no Promise.all): that would break the
+      // transaction's single pinned pg client.
+      const [locked] = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM "TestCase" WHERE id = ${testCaseId} AND "deletedAt" IS NULL FOR UPDATE`;
+      if (!locked) throw new NotFoundException(NOT_FOUND);
 
-    const suggestionId = await this.prisma.$transaction(async (tx) => {
+      const current = await tx.testCase.findFirst({ where: { id: testCaseId }, select: CASE_FIELDS });
+      if (!current) throw new NotFoundException(NOT_FOUND);
+      const changes = buildSuggestionChanges(current, proposed);
+      if (!Object.keys(changes).length) return null;
+
       await tx.testCaseSuggestion.deleteMany({ where: { testCaseId, status: SuggestionStatus.PENDING } });
       const created = await tx.testCaseSuggestion.create({
         data: { testCaseId, changes: changes as Prisma.InputJsonValue, rationale: rationale ?? null, createdById: user.id },
         select: { id: true },
       });
-      return created.id;
+      return { suggestionId: created.id, changes };
     });
-    return { suggestionId, changes };
   }
 
   async pendingFor(testCaseId: string): Promise<PendingSuggestion | null> {
@@ -110,9 +115,14 @@ export class SuggestionsService {
       // `name` and `priority` can only appear here as non-null strings — buildSuggestionChanges
       // never lets them through the accept path as null (see NULLABLE in suggestion-diff.ts) —
       // but changesToUpdateData's return type is shared with every other (nullable) field.
+      const updateData = changesToUpdateData(changes);
+      // Spec §6: accept "validates like a normal edit". The suggestion's `changes` are stored as
+      // free-form JSON (they may have been written by an older version, or hand-edited), so this
+      // is the only place that ever checks their lengths and enum values before they reach Prisma.
+      await this.validateUpdate(updateData);
       await tx.testCase.update({
         where: { id: current.id },
-        data: { ...(changesToUpdateData(changes) as Prisma.TestCaseUncheckedUpdateInput), updatedById: user.id },
+        data: { ...(updateData as Prisma.TestCaseUncheckedUpdateInput), updatedById: user.id },
         select: { id: true },
       });
       await tx.testCaseSuggestion.update({
@@ -125,6 +135,22 @@ export class SuggestionsService {
     // Read the relations back outside the transaction (an include inside would run the relation
     // queries in parallel on the transaction's pinned client).
     return this.prisma.testCase.findUniqueOrThrow({ where: { id: caseId }, include: CASE_INCLUDE });
+  }
+
+  /**
+   * Runs the same class-validator checks `PATCH /test-cases/:id` gets from the global
+   * `ValidationPipe` (`UpdateTestCaseDto`), but by hand: this call never goes through an HTTP
+   * pipe. On failure it throws the same shape `ValidationPipe` would (`message` is the array of
+   * constraint messages), so `HttpExceptionFilter` turns it into the standard
+   * `{ statusCode: 400, error: 'Bad Request', message: 'Validation failed', details }` body.
+   */
+  private async validateUpdate(data: Partial<Record<string, string | null>>): Promise<void> {
+    const dto = plainToInstance(UpdateTestCaseDto, data);
+    const errors = await validate(dto, { whitelist: true, forbidNonWhitelisted: true });
+    if (errors.length) {
+      const messages = errors.flatMap((e) => Object.values(e.constraints ?? {}));
+      throw new BadRequestException(messages);
+    }
   }
 
   async reject(id: string, user: AuthUser): Promise<{ id: string; status: 'REJECTED' }> {
