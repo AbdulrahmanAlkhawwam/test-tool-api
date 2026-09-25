@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { ReviewState } from '@prisma/client';
 import { FakeGitlab, FakeUser } from './utils/fake-gitlab';
 import { seedActors, seedCase, seedModule } from './utils/factories';
 import { createGitlabTestApp, GITLAB_PROJECT_ID as P, seedGitlabConnection, seedLinkedProject } from './utils/gitlab';
@@ -102,6 +103,17 @@ describe('Automated runs (e2e)', () => {
     const res = await trigger({ branch: 'main', scope: { mode: 'CASES', caseIds: [caseIds[0], caseIds[1]] } }).expect(400);
     expect(res.body.message).toBe('Some selected test cases do not exist in this project');
     expect(await ctx.prisma.testRun.count()).toBe(0);
+  });
+
+  it('rejects a CASES scope that includes an AI draft: a draft has no tests and belongs in no run', async () => {
+    const moduleId = (await ctx.prisma.testCase.findUniqueOrThrow({ where: { id: caseIds[0] } })).moduleId;
+    const draft = await seedCase(ctx.prisma, {
+      projectId, moduleId, userId: actors.admin.id, code: 'TC-AUTH-099', reviewState: ReviewState.AI_DRAFT,
+    });
+    const res = await trigger({ branch: 'main', scope: { mode: 'CASES', caseIds: [caseIds[0], draft.id] } }).expect(400);
+    expect(res.body.message).toBe('Some selected test cases do not exist in this project');
+    expect(await ctx.prisma.testRun.count()).toBe(0);
+    expect(fake.pipelines).toHaveLength(0);
   });
 
   it("closes the run with GitLab's message when the pipeline cannot be created", async () => {

@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { ReviewState } from '@prisma/client';
 import { PipelinePollerService } from '../src/modules/automated-runs/pipeline-poller.service';
 import { FakeGitlab, FakeTestReport } from './utils/fake-gitlab';
 import { seedActors, seedCase, seedModule } from './utils/factories';
@@ -138,6 +139,50 @@ describe('Pipeline polling and result import (e2e)', () => {
     await poll();
     expect(await ctx.prisma.testResult.count({ where: { runId: run.id } })).toBe(5);
     expect(fake.requestsTo('/test_report')).toHaveLength(1);
+  });
+
+  it("does not map a draft case's @TC-… tag to a result: a draft has no tests and matches nothing on import", async () => {
+    const draftCode = 'TC-AUTH-004';
+    await seedCase(ctx.prisma, {
+      projectId,
+      moduleId: (await ctx.prisma.testCase.findUniqueOrThrow({ where: { id: caseIds[0] } })).moduleId,
+      userId: actors.admin.id,
+      code: draftCode,
+      reviewState: ReviewState.AI_DRAFT,
+    });
+    const draftReport: FakeTestReport = {
+      total_count: 1,
+      test_suites: [
+        {
+          name: 'chromium',
+          test_cases: [
+            {
+              status: 'success',
+              name: `auth/login.spec.ts › a draft-only scenario @${draftCode}`,
+              classname: 'auth/login.spec.ts',
+              file: 'e2e/auth/login.spec.ts',
+              execution_time: 1,
+            },
+          ],
+        },
+      ],
+    };
+
+    const run = await trigger({ mode: 'ALL' });
+    fake.finishPipeline(run.pipelineId, 'success', draftReport);
+    await poll();
+
+    const body = await detail(run.id);
+    expect(body.results).toHaveLength(1);
+    // The tag resolves against APPROVED_CASE only, so the draft's code is never in the lookup
+    // map: the result comes back unlinked (by its full test title) instead of attached to the
+    // draft's id.
+    expect(body.results[0]).toMatchObject({
+      testCaseId: null,
+      testCase: null,
+      title: `auth/login.spec.ts › a draft-only scenario @${draftCode}`,
+      status: 'PASSED',
+    });
   });
 
   it('completes the run with a note when the pipeline has no test report', async () => {
