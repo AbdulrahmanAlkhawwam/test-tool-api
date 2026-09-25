@@ -1,5 +1,5 @@
 import { Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Res } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthUser } from '../../common/types/auth-user';
@@ -18,6 +18,27 @@ export class SuggestionsController {
    * network hiccup that truncated the body, so the body is written out here explicitly.
    */
   @Get('test-cases/:id/suggestion')
+  @ApiOkResponse({
+    description: "The test case's pending AI suggestion, or null when it has none.",
+    schema: {
+      nullable: true,
+      properties: {
+        id: { type: 'string', format: 'uuid' },
+        testCaseId: { type: 'string', format: 'uuid' },
+        status: { type: 'string', enum: ['PENDING'] },
+        changes: {
+          type: 'object',
+          description: 'Template field → { from, to }, for the fields the suggestion proposes to change.',
+        },
+        rationale: { type: 'string', nullable: true },
+        createdAt: { type: 'string', format: 'date-time' },
+        createdBy: {
+          type: 'object',
+          properties: { id: { type: 'string', format: 'uuid' }, name: { type: 'string' } },
+        },
+      },
+    },
+  })
   async pending(@Param('id', ParseUUIDPipe) id: string, @Res({ passthrough: false }) res: Response): Promise<void> {
     const result = await this.suggestions.pendingFor(id);
     res.status(200).json(result);
