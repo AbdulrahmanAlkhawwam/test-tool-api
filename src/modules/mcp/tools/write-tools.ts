@@ -73,7 +73,7 @@ export function registerWriteTools(server: McpServer, write: McpWriteService, us
     {
       title: 'Update a test case',
       description:
-        'Changes template fields of one test case. Your own AI drafts are edited directly; an already approved ' +
+        'Changes template fields of one test case. AI drafts are edited directly; an already approved ' +
         'case gets a pending suggestion for a tester to accept or reject. You cannot change a case’s ID, ' +
         'module or review state.',
       inputSchema: {

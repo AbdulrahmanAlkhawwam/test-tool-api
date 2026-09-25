@@ -94,7 +94,10 @@ export class ApiTokensService {
     });
     if (!row || !verifyApiTokenHash(candidateHash, row.tokenHash)) throw new UnauthorizedException(BAD_TOKEN);
     if (row.revokedAt || row.expiresAt.getTime() <= Date.now()) throw new UnauthorizedException(BAD_TOKEN);
-    if (!row.user.active) throw new UnauthorizedException(BAD_TOKEN);
+    // `user` is a required relation, so this should never be missing — but a token row whose
+    // user was removed out from under the FK (or never loaded) must still fail closed as the
+    // same uniform 401, not throw a TypeError that turns into a 500.
+    if (!row.user?.active) throw new UnauthorizedException(BAD_TOKEN);
     const { active, ...user } = row.user;
     return { tokenId: row.id, lastUsedAt: row.lastUsedAt, user };
   }
