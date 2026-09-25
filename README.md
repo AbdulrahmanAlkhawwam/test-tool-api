@@ -78,11 +78,13 @@ Claude Desktop (`claude_desktop_config.json`):
 Cursor (`.cursor/mcp.json`): the same `url` and `headers` shape as Claude Desktop above.
 
 The endpoint speaks MCP **Streamable HTTP** in stateless mode: every request gets a fresh server and
-transport, there is no session store, and `GET`/`DELETE` (used by stateful servers for an SSE stream
-and session teardown) both answer `405` with `Allow: POST`. The token is the **only** accepted
-credential: browser JWTs are rejected on `/api/mcp`, and a personal access token is rejected on
-every other route (the global JWT guard can't verify it). `/api/mcp` reads no cookies, so no CSRF
-handling applies to it.
+transport, there is no session store, and an authenticated `GET`/`DELETE` (used by stateful servers
+for an SSE stream and session teardown) both answer `405` with `Allow: POST`. The auth guard applies
+to the whole controller, so an *unauthenticated* `GET` or `DELETE` answers `401` first, before method
+routing is even reached — the `405` is only what a caller with a valid token gets for the wrong
+method. The token is the **only** accepted credential: browser JWTs are rejected on `/api/mcp`, and a
+personal access token is rejected on every other route (the global JWT guard can't verify it).
+`/api/mcp` reads no cookies, so no CSRF handling applies to it.
 
 Two rate limits apply, both returning the same `429` body
 (`{ statusCode: 429, error: 'Too Many Requests', message: 'Too many MCP requests, please slow down' }`):

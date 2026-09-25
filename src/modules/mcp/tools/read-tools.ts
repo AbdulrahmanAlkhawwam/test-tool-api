@@ -14,7 +14,7 @@ export const STATUS = z.enum(['NOT_EXECUTED', 'PASSED', 'FAILED', 'BLOCKED', 'SK
 const projectKey = z.string().min(1).max(20).describe('Project key, e.g. NINJA');
 const moduleCode = z.string().min(1).max(10).describe('Module code, e.g. AUTH');
 /** Spec §7: at most 100 cases per page. */
-export const MAX_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = 100;
 
 export function registerReadTools(server: McpServer, read: McpReadService): void {
   server.registerTool(

@@ -5,7 +5,7 @@ export const PAT_PREFIX = 'ejad_pat_';
 /** Random characters after the prefix. 32 base62 chars ≈ 190 bits. */
 export const PAT_BODY_LENGTH = 32;
 /** How much of the random body is stored in clear text so a user can recognise the token. */
-export const PAT_VISIBLE_PREFIX_LENGTH = 8;
+const PAT_VISIBLE_PREFIX_LENGTH = 8;
 
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 /** 248 = 4 × 62: bytes at or above it are discarded so every character is equally likely. */

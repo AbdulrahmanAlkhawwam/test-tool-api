@@ -7,7 +7,7 @@ import { registerWritePlaywrightTestsPrompt } from './prompts/write-playwright-t
 import { registerReadTools } from './tools/read-tools';
 import { registerWriteTools } from './tools/write-tools';
 
-export const MCP_SERVER_INFO = { name: 'ejad-test-cases', version: '1.0.0' } as const;
+const MCP_SERVER_INFO = { name: 'ejad-test-cases', version: '1.0.0' } as const;
 
 const INSTRUCTIONS = [
   'Ejad test case tool. Work with projects by their key (e.g. NINJA) and test cases by their code (e.g. TC-AUTH-001).',
