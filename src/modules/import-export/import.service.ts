@@ -88,7 +88,12 @@ export class ImportService {
               skipped++;
               continue;
             }
-            await tx.testCase.update({ where: { id: existingId }, data: { ...fields, deletedAt: null } });
+            // No `deletedAt: null` here: `updatable` is already built from APPROVED_CASE above, so
+            // `existingId` can only ever be an approved, active case's id — never a soft-deleted
+            // row's. Writing `deletedAt: null` anyway would be a silent no-op today, but it would
+            // also mean a future widening of `updatable` (e.g. to ACTIVE_CASE) resurrects a
+            // rejected draft's code the moment the same file is re-imported.
+            await tx.testCase.update({ where: { id: existingId }, data: fields });
             imported.push({ caseId: existingId, row });
             updated++;
             continue;
