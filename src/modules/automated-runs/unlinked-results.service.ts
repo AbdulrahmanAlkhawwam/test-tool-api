@@ -38,7 +38,7 @@ export class UnlinkedResultsService {
     // case in the meantime, throwing here rolls the whole transaction back — including the case
     // insert — rather than leaving an orphaned (soft-deleted) case behind.
     return this.prisma.$transaction(async (tx) => {
-      const testCase = await this.testCases.create(result.run.projectId, { moduleId: dto.moduleId, name, priority: dto.priority, notes }, user, tx);
+      const testCase = await this.testCases.create(result.run.projectId, { moduleId: dto.moduleId, name, priority: dto.priority, notes }, user, { db: tx });
       const linked = await tx.testResult.updateMany({ where: { id: resultId, testCaseId: null }, data: { testCaseId: testCase.id } });
       if (linked.count !== 1) throw new ConflictException(ALREADY_LINKED);
       return { testCase, resultId, tag: `@${testCase.code}` };

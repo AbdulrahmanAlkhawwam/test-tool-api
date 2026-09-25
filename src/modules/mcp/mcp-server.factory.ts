@@ -2,7 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { AuthUser } from '../../common/types/auth-user';
 import { McpReadService } from './mcp-read.service';
+import { McpWriteService } from './mcp-write.service';
 import { registerReadTools } from './tools/read-tools';
+import { registerWriteTools } from './tools/write-tools';
 
 export const MCP_SERVER_INFO = { name: 'ejad-test-cases', version: '1.0.0' } as const;
 
@@ -26,7 +28,10 @@ const INSTRUCTIONS = [
  */
 @Injectable()
 export class McpServerFactory {
-  constructor(private readonly read: McpReadService) {}
+  constructor(
+    private readonly read: McpReadService,
+    private readonly write: McpWriteService,
+  ) {}
 
   create(user: AuthUser): McpServer {
     const server = new McpServer(MCP_SERVER_INFO, {
@@ -34,8 +39,8 @@ export class McpServerFactory {
       instructions: INSTRUCTIONS,
     });
     registerReadTools(server, this.read);
-    // Write tools (Task 8) and the prompt (Task 9) are registered here too; `user` is the acting identity.
-    void user;
+    registerWriteTools(server, this.write, user);
+    // The prompt is registered here too (Task 9).
     return server;
   }
 }

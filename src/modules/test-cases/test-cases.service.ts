@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ResultStatus, ReviewState } from '@prisma/client';
+import { CreatedVia, Prisma, ResultStatus, ReviewState } from '@prisma/client';
 import { getLatestExecutedResults } from '../../common/latest-results';
 import { isUniqueViolation } from '../../common/prisma-errors';
 import { ACTIVE_CASE } from '../../common/review-state';
@@ -11,6 +11,18 @@ import { nextCaseCode } from './case-code';
 import { CreateTestCaseDto } from './dto/create-test-case.dto';
 import { ListTestCasesQuery } from './dto/list-test-cases.query';
 import { UpdateTestCaseDto } from './dto/update-test-case.dto';
+
+/** Where a case came from. MCP creates AI drafts; the web and import create approved WEB cases. */
+export interface CaseOrigin {
+  reviewState?: ReviewState;
+  createdVia?: CreatedVia;
+}
+
+export interface CreateCaseOptions {
+  /** A transaction client, when the caller must create the case inside its own transaction. */
+  db?: PrismaService | Prisma.TransactionClient;
+  origin?: CaseOrigin;
+}
 
 @Injectable()
 export class TestCasesService {
@@ -69,16 +81,14 @@ export class TestCasesService {
   }
 
   /**
-   * `db` defaults to the top-level client but accepts a `Prisma.TransactionClient` so a caller
-   * (e.g. creating a case from an unlinked automated result) can create the case and use it in the
-   * same surrounding transaction.
+   * `options.db` defaults to the top-level client but accepts a `Prisma.TransactionClient` so a
+   * caller (e.g. creating a case from an unlinked automated result) can create the case and use it
+   * in the same surrounding transaction. `options.origin` lets the MCP write tools record an AI
+   * draft; every other caller keeps the default APPROVED/WEB origin.
    */
-  async create(
-    projectId: string,
-    dto: CreateTestCaseDto,
-    user: AuthUser,
-    db: PrismaService | Prisma.TransactionClient = this.prisma,
-  ) {
+  async create(projectId: string, dto: CreateTestCaseDto, user: AuthUser, options: CreateCaseOptions = {}) {
+    const db = options.db ?? this.prisma;
+    const origin = options.origin ?? {};
     await this.projects.requireProject(projectId);
     const module = await this.requireModuleInProject(projectId, dto.moduleId);
     const maxAttempts = 5;
@@ -93,7 +103,15 @@ export class TestCasesService {
         // write transaction: an include here would load the relations in parallel on the
         // transaction's single pinned pg client (pg concurrent-query deprecation).
         const { id } = await db.testCase.create({
-          data: { ...dto, code, projectId, createdById: user.id, updatedById: user.id },
+          data: {
+            ...dto,
+            code,
+            projectId,
+            createdById: user.id,
+            updatedById: user.id,
+            reviewState: origin.reviewState ?? ReviewState.APPROVED,
+            createdVia: origin.createdVia ?? CreatedVia.WEB,
+          },
           select: { id: true },
         });
         return this.findWithRelations(id, db);
