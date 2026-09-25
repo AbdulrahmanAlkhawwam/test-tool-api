@@ -36,7 +36,6 @@ export class McpAuthGuard implements CanActivate {
     await this.tokens.touch(tokenId, lastUsedAt);
 
     req.user = user;
-    req.apiTokenId = tokenId;
     return true;
   }
 }

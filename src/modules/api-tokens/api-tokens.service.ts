@@ -82,7 +82,10 @@ export class ApiTokensService {
     if (!isApiTokenFormat(rawToken)) throw new UnauthorizedException(BAD_TOKEN);
     const candidateHash = hashApiToken(rawToken);
     const row = await this.prisma.apiToken.findUnique({
-      where: { tokenHash: candidateHash },
+      // Scoped to MCP so a future RUNNER token (see the schema comment on ApiTokenPurpose) can
+      // never authenticate here just because its hash happens to be valid — the MCP tool surface
+      // must only ever be reachable with an MCP-purpose token.
+      where: { tokenHash: candidateHash, purpose: ApiTokenPurpose.MCP },
       select: {
         id: true,
         tokenHash: true,

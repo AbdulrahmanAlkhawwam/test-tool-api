@@ -1,3 +1,4 @@
+import { ApiTokenPurpose } from '@prisma/client';
 import { ApiTokensService } from './api-tokens.service';
 import { generateApiToken, hashApiToken } from './api-token';
 
@@ -65,5 +66,17 @@ describe('ApiTokensService.verify — fails closed on a missing user row', () =>
       lastUsedAt: null,
       user: { id: 'u1', email: 'tester@ejad.test', name: 'Tester', role: 'TESTER' },
     });
+  });
+
+  it('scopes the lookup to MCP-purpose tokens, so a future RUNNER token cannot authenticate here', async () => {
+    const { service, prisma } = makeService();
+    const token = generateApiToken();
+    prisma.apiToken.findUnique.mockResolvedValueOnce(null);
+
+    await expect(service.verify(token)).rejects.toMatchObject({ status: 401 });
+
+    expect(prisma.apiToken.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ purpose: ApiTokenPurpose.MCP }) }),
+    );
   });
 });
