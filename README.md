@@ -1,7 +1,8 @@
 # Ejad Test Cases API
 
 The backend for Ejad's test case tool: projects, modules, manual test cases, test runs with
-instant-save results, Excel/CSV import and export, reports, and GitLab test automation (Phase 2). NestJS 10, Prisma 7, PostgreSQL 16.
+instant-save results, Excel/CSV import and export, reports, GitLab test automation (Phase 2) and a
+hosted MCP server so AI assistants can write test cases and Playwright tests. NestJS 10, Prisma 7, PostgreSQL 16.
 
 The design spec and plans are in `docs/superpowers/`.
 
@@ -34,6 +35,106 @@ Then continue from `npx prisma migrate dev` above.
 npm test                 # unit tests
 npm run test:e2e         # e2e tests against the test database (port 5442)
 ```
+
+## Connect your AI (MCP)
+
+The API hosts an MCP server at **`POST /api/mcp`** so Claude Code, Claude Desktop, Cursor or any
+other MCP client can read and write test cases. Everything an AI writes is a **draft** until a
+tester approves it in the web app. No environment variable configures this — the token format, the
+rate limits and the batch/page caps are constants in the source.
+
+### 1. Create a personal access token
+
+In the web app, **Profile → AI access**: give the token a name, pick an expiry (30, 90 or 180 days;
+90 by default) and copy the value — it is shown **once**. The token looks like
+`ejad_pat_<32 characters>`. Only its SHA-256 hash and the first 8 characters of the random part are
+stored, so a lost token cannot be recovered; revoke it and make a new one.
+
+A token acts as you, with your role. Revoking it, letting it expire, or deactivating the account
+stops it working immediately (the next request gets `401 Invalid or expired access token` — the
+same message for an unknown, revoked, expired or inactive token, so a caller can never tell which).
+
+### 2. Point your client at the endpoint
+
+Claude Code:
+
+```bash
+claude mcp add --transport http ejad-tests https://<api-host>/api/mcp --header "Authorization: Bearer ejad_pat_…"
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "ejad-tests": {
+      "url": "https://<api-host>/api/mcp",
+      "headers": { "Authorization": "Bearer ejad_pat_…" }
+    }
+  }
+}
+```
+
+Cursor (`.cursor/mcp.json`): the same `url` and `headers` shape as Claude Desktop above.
+
+The endpoint speaks MCP **Streamable HTTP** in stateless mode: every request gets a fresh server and
+transport, there is no session store, and `GET`/`DELETE` (used by stateful servers for an SSE stream
+and session teardown) both answer `405` with `Allow: POST`. The token is the **only** accepted
+credential: browser JWTs are rejected on `/api/mcp`, and a personal access token is rejected on
+every other route (the global JWT guard can't verify it). `/api/mcp` reads no cookies, so no CSRF
+handling applies to it.
+
+Two rate limits apply, both returning the same `429` body
+(`{ statusCode: 429, error: 'Too Many Requests', message: 'Too many MCP requests, please slow down' }`):
+**120 requests per minute per token**, and an IP-keyed **300 requests per minute** that runs ahead of
+authentication so a flood of bad tokens from one address can't dodge the per-token limit. Both
+limiters live in memory, which is one more reason to run a **single** API container.
+
+### 3. What the AI can and cannot do
+
+Nine tools:
+
+| Tool | Description |
+|---|---|
+| `list_projects` | Projects in the tool, with approved case counts and the latest test run. |
+| `get_project` | One project with its modules and each module's approved case count. |
+| `list_test_cases` | Test cases in a project (AI drafts included by default). |
+| `get_test_case` | Every template field of one case, its review state, any pending suggestion and its last 10 results. |
+| `get_failing_cases` | Cases whose most recent executed result is Failed, with the actual result and the run it came from. |
+| `get_test_cases_for_automation` | Approved cases as an automation spec, in code order — the input to Playwright test generation. |
+| `create_module` | Adds a module (feature area) to a project; the code is derived from the name when omitted. |
+| `create_test_cases` | Creates up to 50 cases as AI drafts, each validated on its own. |
+| `update_test_case` | Changes template fields of one case (direct on a draft, a suggestion on an approved case). |
+
+One prompt: `write_playwright_tests` — turns a project's approved test cases into Playwright tests
+tagged with their case codes.
+
+- **New cases** are created as **AI drafts** (`TC-<MODULE>-NNN`, up to 50 per call). Drafts are
+  excluded from runs, reports, the dashboard, project and module case counts, exports and
+  automation coverage until a tester approves them; the Test Cases tab lists them under
+  "AI drafts". Rejecting a draft is the same `DELETE /api/test-cases/:id` a tester uses on any
+  case — it soft-deletes the draft, and its ID is never reused.
+- **Edits to a draft** are applied directly. **Edits to an approved case** become a pending
+  suggestion (one per case, the newest replaces the previous) that a tester accepts or rejects
+  field by field. Accepting is refused with `409` if a human changed one of the same fields
+  meanwhile.
+- The AI **cannot** delete a case, approve a draft, accept a suggestion, create or complete a run,
+  or record results. Those are people's decisions and live in the web app only.
+
+**A malformed call is rejected before it reaches the tool.** `create_test_cases` with more than 50
+cases, or `update_test_case` with a field over its length limit, fails MCP's own schema validation:
+the client sees a JSON-RPC `InvalidParams` error, not a normal tool result with `isError: true`.
+This is deliberate — those two shapes are structurally invalid, unlike an item inside a valid-sized
+`create_test_cases` batch (a bad module code, an empty name, …), which the batch's own per-item
+validation reports individually so the rest of the batch still gets created.
+
+### 4. Playwright tests
+
+Ask for the `write_playwright_tests` prompt (or just ask in words). The AI calls
+`get_test_cases_for_automation` — approved cases only — and writes one `test()` per case titled
+`'<name> @<code>'`. That `@TC-…` tag is what the GitLab result import matches back to the case, so
+the same run that executes the tests fills in the case results (see **Linking tests to test cases**
+above).
 
 ## Deploy (Dokploy)
 
