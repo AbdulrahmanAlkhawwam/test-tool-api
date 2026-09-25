@@ -13,7 +13,6 @@ import {
 } from '../suggestions/suggestion-diff';
 import { SuggestionsService } from '../suggestions/suggestions.service';
 import { CreateTestCaseDto } from '../test-cases/dto/create-test-case.dto';
-import { UpdateTestCaseDto } from '../test-cases/dto/update-test-case.dto';
 import { TestCasesService } from '../test-cases/test-cases.service';
 import { toolErrorMessage } from './tool-result';
 
@@ -206,9 +205,18 @@ export class McpWriteService {
 
     if (existing.reviewState === ReviewState.AI_DRAFT) {
       // changesToUpdateData only ever returns template fields, and the tool's zod schema has
-      // already checked their lengths and the priority enum.
-      await this.testCases.update(existing.id, changesToUpdateData(diff) as unknown as UpdateTestCaseDto, user);
-      return { applied: true, changed };
+      // already checked their lengths and the priority enum. The write is guarded on reviewState
+      // (still AI_DRAFT) and deletedAt so it can never land on a case a tester approved (or
+      // deleted) between the read above and this write — a single Postgres UPDATE ... WHERE
+      // evaluates that condition atomically, the same way SuggestionsService.createOrReplace's
+      // row lock keeps its own read-then-write atomic. When the guard matches nothing, the case
+      // moved on in the meantime, so we fall through to the suggestion path below instead of
+      // silently applying the AI's edit to what is now an approved case.
+      const { count } = await this.prisma.testCase.updateMany({
+        where: { id: existing.id, reviewState: ReviewState.AI_DRAFT, deletedAt: null },
+        data: { ...(changesToUpdateData(diff) as Record<string, unknown>), updatedById: user.id },
+      });
+      if (count > 0) return { applied: true, changed };
     }
 
     const suggestion = await this.suggestions.createOrReplace(existing.id, changes, rationale, user);

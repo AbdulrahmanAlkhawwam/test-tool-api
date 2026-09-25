@@ -4,7 +4,7 @@ import { CreateCaseInput, McpWriteService, repairDerivedModuleCode, validateCase
 const USER = { id: 'u1', email: 'ai@ejad.test', name: 'AI', role: Role.TESTER };
 
 function makeService() {
-  const prisma = { testCase: { findFirst: jest.fn() } };
+  const prisma = { testCase: { findFirst: jest.fn(), updateMany: jest.fn() } };
   const projects = { getByKey: jest.fn() };
   const modules = { create: jest.fn() };
   const testCases = { create: jest.fn(), update: jest.fn() };
@@ -151,5 +151,64 @@ describe('McpWriteService.updateTestCase — reason when nothing changes', () =>
     const result = await service.updateTestCase('NINJA', 'TC-AUTH-001', { steps: '1. Open' }, undefined, USER as never);
 
     expect(result).toEqual({ applied: false, reason: 'The test case already matches the requested values' });
+  });
+});
+
+describe('McpWriteService.updateTestCase — cannot race an Approve into a direct write', () => {
+  // Read as AI_DRAFT: this is what lets the buggy code below take the "apply directly" branch.
+  const DRAFT_AS_READ = {
+    id: 'c1',
+    reviewState: ReviewState.AI_DRAFT,
+    name: 'Login',
+    description: null,
+    preconditions: null,
+    steps: '1. Open',
+    testData: null,
+    expectedResult: null,
+    priority: 'MEDIUM',
+    notes: null,
+  };
+
+  it('falls through to a suggestion instead of writing directly when the case was approved between the read and the write', async () => {
+    const { service, projects, prisma, testCases, suggestions } = makeService();
+    projects.getByKey.mockResolvedValueOnce({ id: 'p1', key: 'NINJA', modules: [] });
+    prisma.testCase.findFirst.mockResolvedValueOnce(DRAFT_AS_READ);
+    // Simulates a tester's Approve landing between the read above and the write below: the
+    // reviewState-guarded UPDATE matches nothing because the row is no longer AI_DRAFT.
+    prisma.testCase.updateMany.mockResolvedValueOnce({ count: 0 });
+    suggestions.createOrReplace.mockResolvedValueOnce({
+      suggestionId: 's1',
+      changes: { steps: { from: '1. Open', to: '1. Open the login page' } },
+    });
+
+    const result = await service.updateTestCase('NINJA', 'TC-AUTH-001', { steps: '1. Open the login page' }, undefined, USER as never);
+
+    // The guarded UPDATE was attempted with reviewState still pinned to AI_DRAFT ...
+    expect(prisma.testCase.updateMany).toHaveBeenCalledWith({
+      where: { id: 'c1', reviewState: ReviewState.AI_DRAFT, deletedAt: null },
+      data: expect.objectContaining({ steps: '1. Open the login page', updatedById: USER.id }),
+    });
+    // ... it must never fall back to an unconditional write that ignores the race ...
+    expect(testCases.update).not.toHaveBeenCalled();
+    // ... and the edit must land as a suggestion instead of being silently applied.
+    expect(suggestions.createOrReplace).toHaveBeenCalledWith(
+      'c1',
+      { steps: '1. Open the login page' },
+      undefined,
+      USER,
+    );
+    expect(result).toEqual({ applied: false, suggestionId: 's1', changed: ['steps'] });
+  });
+
+  it('applies directly when the guarded UPDATE still matches (no race)', async () => {
+    const { service, projects, prisma, suggestions } = makeService();
+    projects.getByKey.mockResolvedValueOnce({ id: 'p1', key: 'NINJA', modules: [] });
+    prisma.testCase.findFirst.mockResolvedValueOnce(DRAFT_AS_READ);
+    prisma.testCase.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    const result = await service.updateTestCase('NINJA', 'TC-AUTH-001', { steps: '1. Open the login page' }, undefined, USER as never);
+
+    expect(result).toEqual({ applied: true, changed: ['steps'] });
+    expect(suggestions.createOrReplace).not.toHaveBeenCalled();
   });
 });
