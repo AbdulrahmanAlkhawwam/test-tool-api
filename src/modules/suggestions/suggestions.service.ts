@@ -99,7 +99,24 @@ export class SuggestionsService {
 
   async accept(id: string, user: AuthUser) {
     const caseId = await this.prisma.$transaction(async (tx) => {
-      // Lock the suggestion row first so two testers cannot both apply it. Everything inside runs
+      // Unlocked lookup only to learn which case this suggestion belongs to. testCaseId never
+      // changes once a suggestion row exists, so reading it before taking any lock is safe; the
+      // suggestion's status/changes are re-read under lock below, once it is actually locked.
+      const stub = await tx.testCaseSuggestion.findUnique({ where: { id }, select: { testCaseId: true } });
+      if (!stub) throw new NotFoundException(SUGGESTION_NOT_FOUND);
+
+      // Lock the TestCase row *before* the suggestion row — the same order createOrReplace() uses
+      // (case, then suggestion; see its comment). Locking in the opposite order, as this method
+      // used to, lets a tester's accept() and the AI's createOrReplace() deadlock under Postgres
+      // (40P01) instead of one simply waiting for the other. Holding this lock across the read
+      // below also closes a second bug: a human PATCH can no longer commit between the staleness
+      // check and the write below and be silently overwritten, since that PATCH's own row UPDATE
+      // now blocks until this transaction commits or rolls back.
+      const [lockedCase] = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM "TestCase" WHERE id = ${stub.testCaseId} AND "deletedAt" IS NULL FOR UPDATE`;
+      if (!lockedCase) throw new NotFoundException(NOT_FOUND);
+
+      // Lock the suggestion row so two testers cannot both apply it. Everything inside runs
       // sequentially: a Promise.all here would break the transaction's single pinned pg client.
       const [locked] = await tx.$queryRaw<{ status: SuggestionStatus; testCaseId: string; changes: unknown }[]>`
         SELECT status, "testCaseId", changes FROM "TestCaseSuggestion" WHERE id = ${id} FOR UPDATE`;

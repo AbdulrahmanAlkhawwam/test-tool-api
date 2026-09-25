@@ -159,4 +159,48 @@ describe('AI change suggestions (e2e)', () => {
     const pending = await ctx.prisma.testCaseSuggestion.findMany({ where: { testCaseId: caseId, status: 'PENDING' } });
     expect(pending).toHaveLength(1);
   });
+
+  it('accept() locks the TestCase row before the suggestion row, so it cannot deadlock with a concurrent createOrReplace', async () => {
+    // accept() used to lock the suggestion row first, then the case row; createOrReplace() locks
+    // the case row first, then the suggestion rows. Opposite order on the same two resources is
+    // the textbook ABBA deadlock: Postgres detects it and aborts one side with 40P01, which is
+    // not an HttpException, so it would surface here as an unhandled 500 instead of a clean HTTP
+    // status. Running several rounds of real concurrent transactions is what would have exposed
+    // that — a single round can get lucky and not interleave badly.
+    const suggestions = ctx.app.get(SuggestionsService);
+    for (let i = 0; i < 8; i++) {
+      const pending = await seedSuggestion(ctx.prisma, { testCaseId: caseId, userId: actors.admin.id, changes: CHANGES });
+      const [acceptRes, replaced] = await Promise.all([
+        ctx.http().post(`/api/suggestions/${pending.id}/accept`).set(actors.testerAuth),
+        suggestions.createOrReplace(caseId, { notes: `Concurrent round ${i}` }, `Round ${i}`, actors.admin),
+      ]);
+      expect([200, 404, 409]).toContain(acceptRes.status);
+      expect(replaced === null || typeof replaced.suggestionId === 'string').toBe(true);
+    }
+  });
+
+  it('a concurrent PATCH during accept always survives — accept never silently overwrites it', async () => {
+    // The old code read the case for its staleness check *unlocked*, then wrote unconditionally.
+    // A human PATCH that committed in that window was invisible to the staleness check and then
+    // silently discarded by accept's own write. Now the case row is locked for that whole window,
+    // so a concurrent PATCH can only fully commit before accept locks the row (accept then sees
+    // it and correctly rejects as stale) or fully commit after accept releases the lock (it lands
+    // on top, as the last writer) — never in between. Either way the PATCH's value must survive.
+    const suggestion = await seedSuggestion(ctx.prisma, { testCaseId: caseId, userId: actors.admin.id, changes: CHANGES });
+    const humanSteps = '1. Open Login\n2. A human rewrote this concurrently';
+
+    const [acceptRes, patchRes] = await Promise.all([
+      ctx.http().post(`/api/suggestions/${suggestion.id}/accept`).set(actors.testerAuth),
+      ctx.http().patch(`/api/test-cases/${caseId}`).set(actors.testerAuth).send({ steps: humanSteps }),
+    ]);
+
+    expect(patchRes.status).toBe(200);
+    expect([200, 409]).toContain(acceptRes.status);
+    if (acceptRes.status === 409) {
+      expect(acceptRes.body.message).toBe('The test case changed since this suggestion – review it again');
+    }
+
+    const stored = await ctx.prisma.testCase.findUniqueOrThrow({ where: { id: caseId } });
+    expect(stored.steps).toBe(humanSteps);
+  });
 });
