@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { AuthUser } from '../../common/types/auth-user';
 import { McpReadService } from './mcp-read.service';
 import { McpWriteService } from './mcp-write.service';
+import { registerWritePlaywrightTestsPrompt } from './prompts/write-playwright-tests';
 import { registerReadTools } from './tools/read-tools';
 import { registerWriteTools } from './tools/write-tools';
 
@@ -40,7 +41,7 @@ export class McpServerFactory {
     });
     registerReadTools(server, this.read);
     registerWriteTools(server, this.write, user);
-    // The prompt is registered here too (Task 9).
+    registerWritePlaywrightTestsPrompt(server);
     return server;
   }
 }
