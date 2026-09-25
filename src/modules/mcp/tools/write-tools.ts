@@ -4,7 +4,8 @@ import { AuthUser } from '../../../common/types/auth-user';
 import { CreateCaseInput, MAX_CASES_PER_CALL, McpWriteService } from '../mcp-write.service';
 import { runTool } from '../tool-result';
 
-const PRIORITY = z.enum(['HIGH', 'MEDIUM', 'LOW']);
+/** Kept as a literal union rather than z.nativeEnum, same reasoning as read-tools.ts's PRIORITY. */
+export const PRIORITY = z.enum(['HIGH', 'MEDIUM', 'LOW']);
 const projectKey = z.string().min(1).max(20).describe('Project key, e.g. NINJA');
 
 /**

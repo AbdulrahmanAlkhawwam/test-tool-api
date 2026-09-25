@@ -4,9 +4,12 @@ import { z } from 'zod';
 import { McpReadService } from '../mcp-read.service';
 import { runTool } from '../tool-result';
 
-/** Kept as literal unions rather than z.nativeEnum so the schema is identical on zod 3 and 4. */
-const PRIORITY = z.enum(['HIGH', 'MEDIUM', 'LOW']);
-const STATUS = z.enum(['NOT_EXECUTED', 'PASSED', 'FAILED', 'BLOCKED', 'SKIPPED']);
+/**
+ * Kept as literal unions rather than z.nativeEnum so the schema is identical on zod 3 and 4.
+ * Exported so read-tools.spec.ts can assert these values never drift from the real Prisma enums.
+ */
+export const PRIORITY = z.enum(['HIGH', 'MEDIUM', 'LOW']);
+export const STATUS = z.enum(['NOT_EXECUTED', 'PASSED', 'FAILED', 'BLOCKED', 'SKIPPED']);
 
 const projectKey = z.string().min(1).max(20).describe('Project key, e.g. NINJA');
 const moduleCode = z.string().min(1).max(10).describe('Module code, e.g. AUTH');

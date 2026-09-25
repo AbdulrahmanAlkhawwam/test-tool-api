@@ -131,6 +131,11 @@ describe('MCP read tools (e2e)', () => {
     await expect(callTool(client, 'list_test_cases', {})).rejects.toThrow();
   });
 
+  it('list_test_cases refuses a zero or negative pageSize', async () => {
+    await expect(callTool(client, 'list_test_cases', { projectKey: 'NINJA', pageSize: 0 })).rejects.toThrow();
+    await expect(callTool(client, 'list_test_cases', { projectKey: 'NINJA', pageSize: -5 })).rejects.toThrow();
+  });
+
   it('get_test_case returns the full template, the pending suggestion and the last 10 results', async () => {
     await ctx.prisma.testCase.update({
       where: { id: ids['TC-AUTH-001'] },
